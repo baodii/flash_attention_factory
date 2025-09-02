@@ -429,7 +429,7 @@ def test_flash_attn_kvcache(
     )
 
     if do_performance:
-        num_iters = 200
+        num_iters = 512
         num_warm = 5
         num_kv = 50
         k_caches = list()
@@ -468,7 +468,7 @@ def test_flash_attn_kvcache(
                     f"Attn: {attn_time:.2f} us, "
                     f"Reduce: {reduce_time:.2f} us, "
                     f"Total KV size: {total_kv_size / (1024 * 1024):.2f} MB, "
-                    f"Bandwidth: {total_kv_size / attn_time / (1000):.2f} GB/s"
+                    f"Bandwidth: {total_kv_size / total_time / (1000):.2f} GB/s"
                 )
     out_ref = out_ref.squeeze(1)
     out_pt = out_pt.squeeze(1)
@@ -515,11 +515,11 @@ def test_flash_attn_kvcache(
 
 if __name__ == "__main__":
     test_flash_attn_kvcache(
-        batch_size = 2,
+        batch_size = 1,
         nheads = 16,
         nheads_k = 2,
         seqlen_q = 1,
-        seqlen_k = 512,
+        seqlen_k = 40000,
         d = 128,
         has_batch_idx = False,
         has_leftpad = False,
@@ -534,6 +534,6 @@ if __name__ == "__main__":
         mha_type = "gqa",
         num_splits = 1,
         dtype = torch.float16,
-        varlen=True,
-        do_performance=False,
+        varlen=False,
+        do_performance=True,
     )
