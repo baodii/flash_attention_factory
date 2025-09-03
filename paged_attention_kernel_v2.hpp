@@ -1342,9 +1342,7 @@ class paged_attention_loop_kernel {
 
   struct arguments_t {
     // Input and output tensors
-    accum_t* max_logits; // [num_seqs, num_heads, max_num_partitions]
-    accum_t* exp_sums; // [num_seqs, num_heads, max_num_partitions]
-    scalar_t* out; // [num_seqs, num_heads, max_num_partitions, head_size]
+    scalar_t* out; // [num_seqs, num_heads, head_size]
     scalar_t* query; // [num_seqs, num_heads, head_size]
     scalar_t* key_cache; // [num_blocks, block_size, num_kv_heads, head_size]
     scalar_t* value_cache; // [num_blocks, block_size, num_kv_heads, head_size]
@@ -1368,8 +1366,6 @@ class paged_attention_loop_kernel {
     accum_t softcap;
 
     inline arguments_t(
-        accum_t* max_logits,
-        accum_t* exp_sums,
         scalar_t* out,
         scalar_t* tem_out,
         scalar_t* query,
@@ -1385,9 +1381,7 @@ class paged_attention_loop_kernel {
         uint32_t head_size,
         uint32_t max_blocks_per_seq,
         accum_t softcap)
-        : max_logits(max_logits),
-          exp_sums(exp_sums),
-          out(out),
+        : out(out),
           tem_out(tem_out),
           query(query),
           key_cache(key_cache),
@@ -1470,6 +1464,8 @@ class paged_attention_loop_kernel {
     int kv_head_stride;
     int start_block_id;
     int end_block_id;
+    uint32_t max_num_blocks;
+    uint32_t num_blocks_per_wg;
 
     float alibi_slopes;
 
@@ -1489,20 +1485,20 @@ class paged_attention_loop_kernel {
       //   alibi_slopes = args.alibi_slopes[head_id];
       // }
 
-      context_len = args.context_lens[seq_id];
       block_table = args.block_tables + seq_id * args.max_blocks_per_seq;
       num_blocks_per_sg = 0;
 
       kv_block_stride = args.num_kv_heads * max_head_size * block_size;
       kv_head_stride = max_head_size * kv_head_id;
+    
+      context_len = args.context_lens[seq_id];
+      max_num_blocks = DIVIDE_ROUND_UP(context_len, block_size);
+      num_blocks_per_wg =
+            use_partition ? partition_size / block_size : max_num_blocks;
 
-      const int max_num_blocks = DIVIDE_ROUND_UP(context_len, block_size);
-      const int num_blocks_per_wg =
-          use_partition ? partition_size / block_size : max_num_blocks;
-
-      start_block_id = partition_id * num_blocks_per_wg;
-      end_block_id =
-          std::min(max_num_blocks, start_block_id + num_blocks_per_wg);
+      // start_block_id = partition_id * num_blocks_per_wg;
+      // end_block_id =
+      //     std::min(max_num_blocks, start_block_id + num_blocks_per_wg);
 
       nbarrier.init_nbarrier(0, nbarrier_role::producer_consumer);
     }
@@ -1530,7 +1526,7 @@ class paged_attention_loop_kernel {
   using score_tile_t = subgroup::tile_t<accum_t, score_tile_desc_t>;
 
   // Compute query x key.
-  inline void compute_score(arguments_t& args) {
+  inline void compute_score(arguments_t& args, const int partition_idx) {
     constexpr uint32_t sg_tile_size_head =
         head_size_stride > 32 / sizeof(scalar_t) ? 32 / sizeof(scalar_t)
                                                  : head_size_stride;  // 16
@@ -1598,8 +1594,11 @@ class paged_attention_loop_kernel {
 
 
     // iterate over context blocks
-    for (int bid = ctx.sg_id + ctx.start_block_id, row_i = 0;
-         bid < ctx.end_block_id;
+    int start_block_idx = partition_idx * ctx.num_blocks_per_wg;
+    int end_block_idx = std::min(ctx.max_num_blocks, 
+        start_block_idx + ctx.num_blocks_per_wg);
+    for (int bid = ctx.sg_id + start_block_idx, row_i = 0;
+         bid < end_block_idx;
          bid += wg_size, row_i++) {
       ctx.update_block_num(row_i + 1);
 
@@ -1741,18 +1740,18 @@ class paged_attention_loop_kernel {
       ctx.nbarrier.arrive_wait();
 
     // store tem_out for softmax check
-    auto* cur_tem_out = args.tem_out + ctx.seq_id * args.num_heads * ctx.max_num_partitions * partition_size + 
-        ctx.kv_head_id * query_group_size * ctx.max_num_partitions * partition_size;
-    uint32_t start_tem_x = ctx.partition_id * partition_size;
-    uint32_t boundary_tem_x = start_tem_x + partition_size;
-    tem_global_st_payload_t tem_out_st_payload(
-        cur_tem_out,
-        boundary_tem_x,
-        query_group_size,
-        ctx.max_num_partitions * partition_size,
-        start_tem_x,
-        ctx.sg_id);
-    subgroup::tile_store(sm_mat_exp_score, tem_out_st_payload);
+    // auto* cur_tem_out = args.tem_out + ctx.seq_id * args.num_heads * ctx.max_num_partitions * partition_size + 
+    //     ctx.kv_head_id * query_group_size * ctx.max_num_partitions * partition_size;
+    // uint32_t start_tem_x = ctx.partition_id * partition_size;
+    // uint32_t boundary_tem_x = start_tem_x + partition_size;
+    // tem_global_st_payload_t tem_out_st_payload(
+    //     cur_tem_out,
+    //     boundary_tem_x,
+    //     query_group_size,
+    //     ctx.max_num_partitions * partition_size,
+    //     start_tem_x,
+    //     ctx.sg_id);
+    // subgroup::tile_store(sm_mat_exp_score, tem_out_st_payload);
 
     // update max and sum
     accum_t max_logits_cur = std::max(max_logits_old, scalar_max);
@@ -1767,7 +1766,7 @@ class paged_attention_loop_kernel {
     using rescale_expsum_payload_t = subgroup::mem_payload_t<
         mem_desc_t<accum_t, mem_layout::row_major, mem_space::local>,
         rescale_expsum_tile_desc_t,
-        msg_type::scatter,
+        msg_type::block_1d,
         arch_tag>;
 
     rescale_expsum_tile_t mat_rescale_expsum(rescale_factor);
@@ -1791,16 +1790,8 @@ class paged_attention_loop_kernel {
   using out_acc_tile_t = subgroup::tile_t<accum_t, out_tile_desc_t>;
   using out_tile_t = subgroup::tile_t<scalar_t, out_tile_desc_t>;
   
-  using rescale_expsum_load_tile_desc_t = subgroup::tile_desc_t<1, wg_size, 1, wg_size>;
-  using rescale_expsum_load_tile_t = subgroup::tile_t<accum_t, rescale_expsum_load_tile_desc_t>;
-  using rescale_expsum_load_payload_t = subgroup::mem_payload_t<
-      mem_desc_t<accum_t, mem_layout::row_major, mem_space::local>,
-      rescale_expsum_load_tile_desc_t,
-      msg_type::scatter,
-      arch_tag>;
-
   // Compute output.
-  inline void compute_out(arguments_t& args, out_acc_tile_t& mat_acc_out) {
+  inline void compute_out(arguments_t& args, out_acc_tile_t& mat_acc_out, const int partition_idx) {
     constexpr uint32_t sg_tile_size_head =
         std::min(uint32_t(head_size_stride), uint32_t(32 / sizeof(scalar_t))); // 16
     constexpr uint32_t sg_tile_size_block = std::min(uint32_t(block_size), 32u); // 32
@@ -1826,7 +1817,7 @@ class paged_attention_loop_kernel {
     using exp_score_payload_t = subgroup::mem_payload_t<
         mem_desc_t<scalar_t, mem_layout::row_major, mem_space::local>,
         exp_score_tile_desc_t,
-        msg_type::scatter,
+        msg_type::block_1d,
         arch_tag>;
     constexpr tdesc_update_dir exp_score_update_dir = tdesc_update_dir::x_dir;
       
@@ -1835,22 +1826,6 @@ class paged_attention_loop_kernel {
     constexpr uint32_t pitch_e = partition_size;
     exp_score_payload_t exp_score_payload(
         slm_offset_exp_score, boundary_e_x, boundary_e_y, pitch_e, 0, 0);
-  
-    
-    // TODO: initialize out_old to 0 for first partition
-    // load old output from slm
-    using out_old_load_payload_t = subgroup::mem_payload_t<
-        mem_desc_t<accum_t, mem_layout::row_major, mem_space::local>,
-        out_tile_desc_t,
-        msg_type::scatter,
-        arch_tag>;
-    out_old_load_payload_t out_old_load_payload(
-        slm_offset_out_old,
-        max_head_size,
-        query_group_size,
-        max_head_size,
-        ctx.sg_id * head_size_per_sg,
-        0);
     
     using tile_mma = subgroup::tile_mma_t<
         out_acc_tile_t,
@@ -1864,10 +1839,13 @@ class paged_attention_loop_kernel {
     value_tile_t mat_value;
     // out_acc_tile_t mat_acc_out(0.0f);
 
+    int start_block_idx = partition_idx * ctx.num_blocks_per_wg;
+    int end_block_idx = std::min(ctx.max_num_blocks, 
+        start_block_idx + ctx.num_blocks_per_wg);
 #pragma unroll
     for (uint32_t i = 0; i < value_blocks_per_sg; ++i) {
-      uint32_t cur_bid = i + ctx.start_block_id; 
-      if (cur_bid >= ctx.end_block_id) break;
+      uint32_t cur_bid = i + start_block_idx; 
+      if (cur_bid >= end_block_idx) break;
 
       uint32_t block_id = ctx.block_table[cur_bid];
       
@@ -1890,30 +1868,59 @@ class paged_attention_loop_kernel {
     }
 
     // load old output from slm
+    using out_old_load_payload_t = subgroup::mem_payload_t<
+        mem_desc_t<accum_t, mem_layout::row_major, mem_space::local>,
+        out_tile_desc_t,
+        msg_type::block_1d,
+        arch_tag>;
+    out_old_load_payload_t out_old_load_payload(
+        slm_offset_out_old,
+        max_head_size,
+        query_group_size,
+        max_head_size,
+        ctx.sg_id * head_size_per_sg,
+        0);
     out_acc_tile_t mat_acc_out_old;
     subgroup::tile_load(mat_acc_out_old, out_old_load_payload);
 
     // load rescale_factor from slm
-    rescale_load_payload_t rescale_load_payload(
-        slm_offset_rescale_factors, 1, wg_size, 1, 0, 0);
+    using rescale_expsum_load_tile_desc_t = subgroup::tile_desc_t<1, query_group_size, 1, query_group_size>;
+    using rescale_expsum_load_tile_t = subgroup::tile_t<accum_t, rescale_expsum_load_tile_desc_t>;
+    using rescale_expsum_load_payload_t = subgroup::mem_payload_t<
+        mem_desc_t<accum_t, mem_layout::row_major, mem_space::local>,
+        rescale_expsum_load_tile_desc_t,
+        msg_type::block_1d,
+        arch_tag>;
+
+    rescale_expsum_load_payload_t rescale_load_payload(
+        slm_offset_rescale_factors, 1, query_group_size, 1, 0, 0);
     rescale_expsum_load_tile_t mat_rescale;
     subgroup::tile_load(mat_rescale, rescale_load_payload);
-    mat_acc_out.reg += mat_rescale.reg * mat_acc_out_old.reg;
+    mat_acc_out.reg += mat_vec_mul_broadcast<accum_t, query_group_size, out_acc_tile_t, 0>(
+        mat_rescale.reg, mat_acc_out_old); 
   }
 
   // -------------------- // store_out // -------------------- //
 
   inline void store_out(arguments_t& args, out_acc_tile_t& mat_acc_out) {
+    using rescale_expsum_load_tile_desc_t = subgroup::tile_desc_t<1, query_group_size, 1, query_group_size>;
+    using rescale_expsum_load_tile_t = subgroup::tile_t<accum_t, rescale_expsum_load_tile_desc_t>;
+    using rescale_expsum_load_payload_t = subgroup::mem_payload_t<
+        mem_desc_t<accum_t, mem_layout::row_major, mem_space::local>,
+        rescale_expsum_load_tile_desc_t,
+        msg_type::block_1d,
+        arch_tag>;
+    
     using exp_sum_load_payload_t = subgroup::mem_payload_t<
         mem_desc_t<accum_t, mem_layout::row_major, mem_space::local>,
         rescale_expsum_load_tile_desc_t,
-        msg_type::scatter,
+        msg_type::block_1d,
         arch_tag>;
     rescale_expsum_load_payload_t exp_sum_load_payload(
         slm_offset_exp_sum, 1, wg_size, 1, 0, 0);
     rescale_expsum_load_tile_t mat_exp_sum;
     subgroup::tile_load(mat_exp_sum, exp_sum_load_payload);
-    mat_acc_out.reg /= mat_exp_sum.reg;
+    // mat_acc_out.reg /= mat_exp_sum.reg;
 
     out_tile_t mat_out;
     subgroup::elemwise_cvt(mat_out, mat_acc_out);
@@ -1956,11 +1963,10 @@ class paged_attention_loop_kernel {
   // Helper function to get the nd_range.
   static inline sycl::nd_range<3> get_nd_range(
       uint32_t num_seqs,
-      uint32_t num_kv_heads,
-      uint32_t max_num_partitions) {
+      uint32_t num_kv_heads) {
     static const sycl::range<3> local_range = sycl::range<3>{1, 1, wg_size};
     sycl::range<3> group_range =
-        sycl::range<3>{num_kv_heads, num_seqs, max_num_partitions};
+        sycl::range<3>{num_kv_heads, num_seqs, 1};
     return sycl::nd_range<3>{group_range * local_range, local_range};
   };
 
@@ -1971,9 +1977,6 @@ class paged_attention_loop_kernel {
     // initialization
 
     ctx.init(item, args);
-    if (use_partition && ctx.start_block_id >= ctx.end_block_id) {
-      return;
-    }
 
     xetla_local_init<get_slm_size()>();
     xetla_nbarrier_init<get_barrier_count()>();
@@ -1985,9 +1988,9 @@ class paged_attention_loop_kernel {
 
 #pragma unroll
     for (int p_id = 0; p_id < num_loop; p_id++) {
-      compute_score(args);
+      compute_score(args, p_id);
       softmax(args, max_logits_old, exp_sums_old);
-      compute_out(args, mat_out_acc);
+      compute_out(args, mat_out_acc, p_id);
     }
 
     store_out(args, mat_out_acc);

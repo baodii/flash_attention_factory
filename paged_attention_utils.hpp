@@ -445,6 +445,78 @@ mat_vec_mul(xetla_vector<dtype, N> vec, mat_t& mat) {
   return res;
 }
 
+template <typename dtype, uint32_t N, typename mat_t, int dim>
+inline typename std::enable_if_t<
+    dim == 0 && std::is_same<dtype, typename mat_t::dtype>::value &&
+        mat_t::tile_size_y == N,
+    xetla_vector<dtype, mat_t::tile_size_x * mat_t::tile_size_y>>
+mat_vec_mul_broadcast(xetla_vector<dtype, N> vec, mat_t& mat) {
+  constexpr uint32_t num_block_x = mat_t::num_block_x;
+  constexpr uint32_t num_block_y = mat_t::num_block_y;
+  constexpr uint32_t tile_size_x = mat_t::tile_size_x;
+  constexpr uint32_t tile_size_y = mat_t::tile_size_y;
+  constexpr uint32_t block_size_x = mat_t::block_size_x;
+  constexpr uint32_t block_size_y = mat_t::block_size_y;
+  constexpr uint32_t block_elems = mat_t::block_elems;
+  constexpr uint32_t remained_size_y = mat_t::remained_size_y;
+
+  using tile_desc_t = subgroup::
+      tile_desc_t<tile_size_x, tile_size_y, block_size_x, block_size_y>;
+  using tile_t = subgroup::tile_t<dtype, tile_desc_t>;
+  tile_t acc;
+
+  for (int i = 0; i < num_block_x; ++i) {
+    // j = 0
+    auto mat_sub = mat.reg.xetla_select<block_elems, 1>(i * block_elems)
+                       .xetla_format<dtype, block_size_y, block_size_x>();
+    for (int row_i = 0; row_i < block_size_y; ++row_i) {
+      auto acc_sub = acc.reg.xetla_select<block_size_x, 1>(
+          i * block_elems + row_i * block_size_x);
+      auto vec_sub = vec.xetla_select<1, 1>(row_i);
+      acc_sub = vec_sub * mat_sub.row(row_i);
+    }
+  }
+
+  for (int i = 0; i < num_block_x; ++i) {
+    // j=1...
+    for (int j = 1; j < num_block_y; ++j) {
+      auto mat_sub =
+          mat.reg
+              .xetla_select<block_elems, 1>((j * num_block_x + i) * block_elems)
+              .xetla_format<dtype, block_size_y, block_size_x>();
+
+      for (int row_i = 0; row_i < block_size_y; ++row_i) {
+        auto acc_sub = acc.reg.xetla_select<block_size_x, 1>(
+            i * block_elems + row_i * block_size_x + j * num_block_x * block_elems);
+        auto vec_sub = vec.xetla_select<1, 1>(j * block_size_y + row_i);
+        acc_sub = vec_sub * mat_sub.row(row_i);
+      }
+    }
+  }
+
+  if constexpr (remained_size_y > 0) {
+    for (int i = 0; i < num_block_x; ++i) {
+      constexpr uint32_t remained_start_y = num_block_y * block_size_y;
+      constexpr uint32_t remained_block_elems = remained_size_y * block_size_x;
+      auto mat_sub =
+          mat.reg
+              .xetla_select<remained_block_elems, 1>(
+                  remained_start_y * tile_size_x + i * remained_block_elems)
+              .xetla_format<dtype, remained_size_y, block_size_x>();
+
+      for (int row_i = 0; row_i < remained_size_y; ++row_i) {
+        auto acc_sub = acc.xetla_select<block_size_x, 1>(
+            i * block_elems + row_i * block_size_x + remained_start_y * tile_size_x);
+        auto vec_sub = vec.xetla_select<1, 1>(remained_start_y + row_i);
+        acc_sub = vec_sub * mat_sub.row(row_i);
+      }
+    }
+  }
+
+  // auto res = tile_reduce<reduce_op::sum, dtype, dtype, 0>(acc);
+  return acc.reg;
+}
+
 template <
     typename mat_t,
     uint32_t wg_size,
