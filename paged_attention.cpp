@@ -103,7 +103,7 @@ std::vector<float> paged_attention_loop(
   auto *exp_sums_ptr = exp_sums.data_ptr<float>();
   auto *output_ptr = output.data_ptr();
   auto *tem_output_ptr = tem_output.data_ptr();
-  auto *debug_output_ptr = debug_output.data_ptr();
+  auto *debug_output_ptr = debug_output.data_ptr<float>();
   auto *alibi_slopes_ptr = alibi_slopes.data_ptr<float>();
   auto *block_tables_ptr = block_tables.data_ptr();
   auto *context_lens_ptr = context_lens.data_ptr();
@@ -121,7 +121,7 @@ std::vector<float> paged_attention_loop(
       reinterpret_cast<T *>(tem_output_ptr), reinterpret_cast<T *>(query_ptr),
       reinterpret_cast<T *>(key_cache_ptr),
       reinterpret_cast<T *>(value_cache_ptr), alibi_slopes_ptr,
-      reinterpret_cast<T *>(debug_output_ptr),
+      reinterpret_cast<float *>(debug_output_ptr),
       reinterpret_cast<U *>(block_tables_ptr),
       reinterpret_cast<U *>(context_lens_ptr), max_num_partitions,
       num_queries_per_tokens, sm_scale, num_seqs, num_heads, num_kv_heads,

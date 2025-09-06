@@ -105,7 +105,38 @@ def attention_ref(
         scores.masked_fill_(local_mask, float("-inf"))
     if attn_bias is not None:
         scores = scores + attn_bias
-    attention = torch.softmax(scores, dim=-1).to(v.dtype)
+    # attention = torch.softmax(scores, dim=-1).to(v.dtype)
+    scores_max = torch.max(scores, dim=-1, keepdim=True)
+    scores_exp = torch.exp(scores - scores_max.values)
+    scores_exp_sum = torch.sum(scores_exp, dim=-1, keepdim=True)
+    attention = (scores_exp / scores_exp_sum).to(v.dtype)
+    # for debugging
+    partition_size = 512
+    num_partitions = int((seqlen_k + partition_size - 1) / partition_size)
+    old_max = torch.full_like(scores_max.values, float("-inf"))
+    old_sum = torch.zeros_like(scores_exp_sum)
+    old_output = torch.zeros_like(q).to(dtype=torch.float32)
+    out_partitions = torch.zeros((q.shape[0], q.shape[1], q.shape[2], num_partitions * q.shape[3]), dtype=torch.float32, device=q.device)
+    for i in range(num_partitions):
+        scores_part = scores[:, :, :, i * partition_size : (i + 1) * partition_size]
+        scores_max_part = torch.max(scores_part, dim=-1, keepdim=True).values
+        cur_max = torch.max(old_max, scores_max_part)
+        attn_part = torch.exp(scores_part - cur_max)
+        rescale_factors = torch.exp(old_max - cur_max)
+        cur_sum = rescale_factors * old_sum + torch.sum(attn_part, dim=-1, keepdim=True)
+        old_max = cur_max
+        old_sum = cur_sum
+        print(f"rescale_factors: {rescale_factors} \n cur_sum: {cur_sum}")
+        out_par = torch.einsum("bhts,bshd->bthd", (attn_part), v[:, i * partition_size : (i + 1) * partition_size])
+        debug_rescale = torch.ones_like(rescale_factors)
+        out_par += old_output * debug_rescale.permute(0, 2, 1, 3)
+        old_output = out_par
+        head_size = q.shape[-1]
+        out_partitions[:, :, :, i * head_size : (i + 1) * head_size] = out_par # for debugging
+
+    # output_p = old_output / old_sum.permute(0, 2, 1, 3)
+    output_p = old_output
+
     # Some rows might be completely masked out so we fill them with zero instead of NaN
     if window_size[0] >= 0 or window_size[1] >= 0:
         attention = attention.masked_fill(torch.all(local_mask, dim=-1, keepdim=True), 0.0)
@@ -123,7 +154,7 @@ def attention_ref(
     output = torch.einsum("bhts,bshd->bthd", attention_drop, v * dropout_scaling)
     if query_padding_mask is not None:
         output.masked_fill_(rearrange(~query_padding_mask, "b s -> b s 1 1"), 0.0)
-    return output.to(dtype=dtype_og), attention.to(dtype=dtype_og)
+    return output_p.to(dtype=dtype_og), attention.to(dtype=dtype_og), out_partitions
 
 def _generate_block_kvcache(seqlen_k, paged_kv_block_size, batch_size, nheads_k, d, device, dtype):
     # num_blocks = math.ceil(seqlen_k / paged_kv_block_size) * batch_size * 3
@@ -363,7 +394,7 @@ def test_flash_attn_kvcache(
         v_cache_ref[update_mask] = rearrange(v, "b s ... -> (b s) ...")
     k_cache_rep = repeat(k_cache_ref, "b s h d -> b s (h g) d", g=nheads // nheads_k)
     v_cache_rep = repeat(v_cache_ref, "b s h d -> b s (h g) d", g=nheads // nheads_k)
-    out_ref, out_attn = attention_ref(
+    out_ref, out_attn, out_partitions = attention_ref(
         q_ro,
         k_cache_rep,
         v_cache_rep,
@@ -376,7 +407,7 @@ def test_flash_attn_kvcache(
         window_size=window_size,
         key_leftpad=cache_leftpad,
     )
-    out_pt, out_attn_2 = attention_ref(
+    out_pt, out_attn_2, _ = attention_ref(
         q_ro,
         k_cache_rep,
         v_cache_rep,
@@ -398,7 +429,7 @@ def test_flash_attn_kvcache(
     exp_sums = torch.empty_like(max_logits)
     out = torch.zeros((batch_size, nheads, d), dtype=torch.float16, device=device)
     tem_output = torch.zeros((batch_size, nheads, num_partitions, d), dtype=torch.float16, device=device)
-    debug_output = torch.zeros((batch_size, nheads, num_partitions * partition_size), dtype=torch.float16, device=device)
+    debug_output = torch.zeros((batch_size, nheads, num_partitions * d), dtype=torch.float32, device=device)
     query = q.view(batch_size * seqlen_q, nheads, d).contiguous().to(device=device, dtype=torch.float16)
     alibi_slopes = torch.ones((nheads), dtype=torch.float32, device=device)
     context_lens = torch.tensor([seqlen_k] * batch_size, dtype=torch.int32, device=device)
@@ -409,7 +440,7 @@ def test_flash_attn_kvcache(
     sm_scale = 1. / math.sqrt(d)
     softcat = -1.0
 
-    eclips_times = paged_attention.run(
+    eclips_times = paged_attention.run_loop(
         max_logits,
         exp_sums,
         tem_output,
@@ -474,12 +505,14 @@ def test_flash_attn_kvcache(
     out_pt = out_pt.squeeze(1)
     out_attn = out_attn.squeeze(2)
     out_attn_2 = out_attn_2.squeeze(2)
+    print(f"out_ref: {out_ref[0, 0, :10]}")
+    print(f"out: {out[0, 0, :10]}")
     print(f"eclips times: {eclips_times}")
     # assert_close_verbose(out_attn_2, debug_output, rtol=1e-3, atol=1e-3)
-    # assert_close_verbose(out, out_ref, rtol=1e-3, atol=1e-3)
+    # assert_close_verbose(out, out_ref, rtol=1e-2, atol=1e-2)
     # print(f"debug_output: {debug_output[0, 0, :]}")
     # print(f"out_attn_2: {out_attn_2[0, 0, :]}")
-    print(f"scores max diff: {(out_attn_2 - debug_output[:, :, :seqlen_k]).abs().max().item()}")
+    # print(f"scores max diff: {(out_attn_2 - debug_output[:, :, :seqlen_k]).abs().max().item()}")
     # exit(0)
     print(f"Output max diff: {(out - out_ref).abs().max().item()}")
     print(f"Output mean diff: {(out - out_ref).abs().mean().item()}")
@@ -519,7 +552,7 @@ if __name__ == "__main__":
         nheads = 16,
         nheads_k = 2,
         seqlen_q = 1,
-        seqlen_k = 40000,
+        seqlen_k = 1024,
         d = 128,
         has_batch_idx = False,
         has_leftpad = False,
@@ -535,5 +568,5 @@ if __name__ == "__main__":
         num_splits = 1,
         dtype = torch.float16,
         varlen=False,
-        do_performance=True,
+        do_performance=False,
     )
