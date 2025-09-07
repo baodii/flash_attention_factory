@@ -910,11 +910,6 @@ private:
       src_sub = ld_tile.reg;
       ctx.update_partition_num(row_i + 1);
 
-      // accum_t scalar_value = src_sub.xetla_select<1, 1>(0)[0];
-      // sycl::ext::oneapi::experimental::printf("head_id: %d, sg_id: %d
-      // scalar_value: %f\n",
-      //     ctx.head_id, ctx.sg_id, scalar_value); // Debugging output
-
       int32_t remain = ctx.num_partitions - i;
       if (remain < partition_stride) {
         xetla_mask<partition_stride> mask =
@@ -1143,10 +1138,6 @@ public:
                                                uint32_t num_heads) {
     static const sycl::range<3> local_range = sycl::range<3>{1, 1, wg_size};
     sycl::range<3> group_range = sycl::range<3>{num_seqs, num_heads, 1};
-    // printf("group_range: %zu, %zu, %zu local_range: %zu, %zu, %zu\n",
-    //        group_range[0], group_range[1], group_range[2],
-    //        local_range[0], local_range[1], local_range[2]); // Debugging
-    //        output */
     return sycl::nd_range<3>{group_range * local_range, local_range};
   };
 
@@ -1181,7 +1172,7 @@ public:
     float *alibi_slopes;   // [num_heads] - alibi_slopes
 
     // temporary output
-    accum_t 
+    accum_t
         *tem_out; // [num_seqs, num_heads, max_num_partitions * partition_size]
     // Index
     index_t *block_tables; // [num_seqs, max_blocks_per_seq]
@@ -1471,107 +1462,104 @@ private:
   inline void softmax(arguments_t &args, accum_t &max_logits_old,
                       accum_t &exp_sums_old,
                       const int partition_idx /*for debug*/) {
-    using softmax_score_tile_desc_t =
-        subgroup::tile_desc_t<partition_size, 1, mma_sg_tile_size, 1>;
-    using softmax_score_tile_t =
-        subgroup::tile_t<accum_t, softmax_score_tile_desc_t>;
-    softmax_score_tile_t sm_mat_score;
+    if (ctx.sg_id < query_group_size) {
+      using softmax_score_tile_desc_t =
+          subgroup::tile_desc_t<partition_size, 1, mma_sg_tile_size, 1>;
+      using softmax_score_tile_t =
+          subgroup::tile_t<accum_t, softmax_score_tile_desc_t>;
+      softmax_score_tile_t sm_mat_score;
 
-    using sm_local_ld_payload_t = subgroup::mem_payload_t<
-        mem_desc_t<accum_t, mem_layout::row_major, mem_space::local>,
-        softmax_score_tile_desc_t, msg_type::block_1d, arch_tag>;
-    using sm_local_st_payload_t = subgroup::mem_payload_t<
-        mem_desc_t<scalar_t, mem_layout::row_major, mem_space::local>,
-        softmax_score_tile_desc_t, msg_type::block_1d, arch_tag>;
+      using sm_local_ld_payload_t = subgroup::mem_payload_t<
+          mem_desc_t<accum_t, mem_layout::row_major, mem_space::local>,
+          softmax_score_tile_desc_t, msg_type::block_1d, arch_tag>;
+      using sm_local_st_payload_t = subgroup::mem_payload_t<
+          mem_desc_t<scalar_t, mem_layout::row_major, mem_space::local>,
+          softmax_score_tile_desc_t, msg_type::block_1d, arch_tag>;
 
-    // tem_out to check if softmax right
-    using tem_global_st_payload_t = subgroup::mem_payload_t<
-        mem_desc_t<scalar_t, mem_layout::row_major, mem_space::global>,
-        softmax_score_tile_desc_t, msg_type::block_1d, arch_tag>;
+      // tem_out to check if softmax right
+      using tem_global_st_payload_t = subgroup::mem_payload_t<
+          mem_desc_t<scalar_t, mem_layout::row_major, mem_space::global>,
+          softmax_score_tile_desc_t, msg_type::block_1d, arch_tag>;
 
-    uint32_t start_y = ctx.sg_id;
-    constexpr uint32_t boundary_y = query_group_size;
-    sm_local_ld_payload_t sm_local_ld_payload(slm_offset_score, partition_size,
-                                              boundary_y, partition_size, 0,
-                                              start_y);
+      uint32_t start_y = ctx.sg_id;
+      constexpr uint32_t boundary_y = query_group_size;
+      sm_local_ld_payload_t sm_local_ld_payload(slm_offset_score,
+                                                partition_size, boundary_y,
+                                                partition_size, 0, start_y);
 
-    subgroup::tile_load(sm_mat_score, sm_local_ld_payload);
-    xetla_vector<accum_t, 1> max_score =
-        subgroup::tile_reduce<reduce_op::max, accum_t, accum_t, 1>(
-            sm_mat_score);
+      subgroup::tile_load(sm_mat_score, sm_local_ld_payload);
+      xetla_vector<accum_t, 1> max_score =
+          subgroup::tile_reduce<reduce_op::max, accum_t, accum_t, 1>(
+              sm_mat_score);
 
-    accum_t scalar_max = max_score[0];
-    accum_t max_logits_cur = std::max(max_logits_old, scalar_max);
-    sm_mat_score.reg -= max_logits_cur;
-    sm_mat_score.reg = xetla_exp<accum_t>(sm_mat_score.reg);
+      accum_t scalar_max = max_score[0];
+      accum_t max_logits_cur = std::max(max_logits_old, scalar_max);
+      sm_mat_score.reg -= max_logits_cur;
+      sm_mat_score.reg = xetla_exp<accum_t>(sm_mat_score.reg);
 
-    xetla_vector<accum_t, 1> sum_score =
-        subgroup::tile_reduce<reduce_op::sum, accum_t, accum_t, 1>(
-            sm_mat_score);
-    accum_t scalar_sum = sum_score[0];
+      xetla_vector<accum_t, 1> sum_score =
+          subgroup::tile_reduce<reduce_op::sum, accum_t, accum_t, 1>(
+              sm_mat_score);
+      accum_t scalar_sum = sum_score[0];
 
-    // Store the softmax result back to shared local memory
-    using softmax_exp_score_tile_t =
-        subgroup::tile_t<scalar_t, softmax_score_tile_desc_t>;
-    softmax_exp_score_tile_t sm_mat_exp_score;
-    subgroup::elemwise_cvt(sm_mat_exp_score, sm_mat_score);
+      // Store the softmax result back to shared local memory
+      using softmax_exp_score_tile_t =
+          subgroup::tile_t<scalar_t, softmax_score_tile_desc_t>;
+      softmax_exp_score_tile_t sm_mat_exp_score;
+      subgroup::elemwise_cvt(sm_mat_exp_score, sm_mat_score);
 
-    sm_local_st_payload_t sm_local_st_payload(slm_offset_exp_score,
-                                              partition_size, boundary_y,
-                                              partition_size, 0, start_y);
-    subgroup::tile_store(sm_mat_exp_score, sm_local_st_payload);
-    // xetla_fence<memory_kind::shared_local>();
-    // if constexpr (wg_size > 1)
-    //   ctx.nbarrier.arrive_wait();
-
-    // store tem_out for softmax check
-    // auto* cur_tem_out = args.tem_out + ctx.seq_id * args.num_heads *
-    // ctx.max_num_partitions * partition_size +
-    //     ctx.kv_head_id * query_group_size * ctx.max_num_partitions *
-    //     partition_size;
-    // uint32_t start_tem_x = partition_idx * partition_size;
-    // uint32_t boundary_tem_x = start_tem_x + partition_size;
-    // tem_global_st_payload_t tem_out_st_payload(
-    //     cur_tem_out,
-    //     boundary_tem_x,
-    //     query_group_size,
-    //     ctx.max_num_partitions * partition_size,
-    //     start_tem_x,
-    //     ctx.sg_id);
-    // subgroup::tile_store(sm_mat_exp_score, tem_out_st_payload);
-
-    // update max and sum
-    accum_t rescale_factor = std::exp(max_logits_old - max_logits_cur);
-    accum_t exp_sums_cur = rescale_factor * exp_sums_old + scalar_sum;
-    max_logits_old = max_logits_cur;
-    exp_sums_old = exp_sums_cur;
+      sm_local_st_payload_t sm_local_st_payload(slm_offset_exp_score,
+                                                partition_size, boundary_y,
+                                                partition_size, 0, start_y);
+      subgroup::tile_store(sm_mat_exp_score, sm_local_st_payload);
       
-    // store rescale_factor and exp_sum into shared local memory for compute_out
-    using rescale_expsum_tile_desc_t = subgroup::tile_desc_t<1, 1, 1, 1>;
-    using rescale_expsum_tile_t =
-        subgroup::tile_t<accum_t, rescale_expsum_tile_desc_t>;
-    using rescale_expsum_payload_t = subgroup::mem_payload_t<
-        mem_desc_t<accum_t, mem_layout::row_major, mem_space::local>,
-        rescale_expsum_tile_desc_t, msg_type::block_1d, arch_tag>;
+      // store tem_out for softmax check
+      // auto* cur_tem_out = args.tem_out + ctx.seq_id * args.num_heads *
+      // ctx.max_num_partitions * partition_size +
+      //     ctx.kv_head_id * query_group_size * ctx.max_num_partitions *
+      //     partition_size;
+      // uint32_t start_tem_x = partition_idx * partition_size;
+      // uint32_t boundary_tem_x = start_tem_x + partition_size;
+      // tem_global_st_payload_t tem_out_st_payload(
+      //     cur_tem_out,
+      //     boundary_tem_x,
+      //     query_group_size,
+      //     ctx.max_num_partitions * partition_size,
+      //     start_tem_x,
+      //     ctx.sg_id);
+      // subgroup::tile_store(sm_mat_exp_score, tem_out_st_payload);
 
-    rescale_expsum_tile_t mat_rescale(rescale_factor);
-    rescale_expsum_payload_t rescale_factor_payload(
-        slm_offset_rescale_factors, 1, query_group_size, 1, 0, ctx.sg_id);
-    subgroup::tile_store(mat_rescale, rescale_factor_payload);
+      // update max and sum
+      accum_t rescale_factor = std::exp(max_logits_old - max_logits_cur);
+      accum_t exp_sums_cur = rescale_factor * exp_sums_old + scalar_sum;
+      max_logits_old = max_logits_cur;
+      exp_sums_old = exp_sums_cur;
 
-    // mat_rescale.reg = exp_sums_old;
-    rescale_expsum_tile_t mat_exp_sum(exp_sums_old);
-    rescale_expsum_payload_t exp_sum_payload(slm_offset_exp_sum, 1, query_group_size, 1,
-                                             0, ctx.sg_id);
-    subgroup::tile_store(mat_exp_sum, exp_sum_payload);
-    accum_t tmp_exp_sum = mat_exp_sum.reg.xetla_select<1,1>(0)[0];
-    
-    sycl::ext::oneapi::experimental::printf("softmax: sg_id: %d, kv_head: %d, rescale: %f, exp_sum: %f\n",
-                                            ctx.sg_id, ctx.kv_head_id, rescale_factor, tmp_exp_sum);
+      // store rescale_factor and exp_sum into shared local memory for
+      // compute_out
+      using rescale_expsum_tile_desc_t = subgroup::tile_desc_t<1, 1, 1, 1>;
+      using rescale_expsum_tile_t =
+          subgroup::tile_t<accum_t, rescale_expsum_tile_desc_t>;
+      using rescale_expsum_payload_t = subgroup::mem_payload_t<
+          mem_desc_t<accum_t, mem_layout::row_major, mem_space::local>,
+          rescale_expsum_tile_desc_t, msg_type::block_1d, arch_tag>;
+
+      rescale_expsum_tile_t mat_rescale(rescale_factor);
+      rescale_expsum_payload_t rescale_factor_payload(
+          slm_offset_rescale_factors, 1, query_group_size, 1, 0, ctx.sg_id);
+      subgroup::tile_store(mat_rescale, rescale_factor_payload);
+
+      // mat_rescale.reg = exp_sums_old;
+      rescale_expsum_tile_t mat_exp_sum(exp_sums_old);
+      rescale_expsum_payload_t exp_sum_payload(
+          slm_offset_exp_sum, 1, query_group_size, 1, 0, ctx.sg_id);
+      subgroup::tile_store(mat_exp_sum, exp_sum_payload);
+    } // end if sg_id < query_group_size
 
     xetla_fence<memory_kind::shared_local>();
     if constexpr (wg_size > 1)
       ctx.nbarrier.arrive_wait();
+
   }
 
   // -------------------- // compute_out // -------------------- //
@@ -1584,7 +1572,7 @@ private:
 
   // Compute output.
   inline void compute_out(arguments_t &args, out_acc_tile_t &mat_acc_old,
-                            const int partition_idx) {
+                          const int partition_idx) {
     constexpr uint32_t sg_tile_size_head = std::min(
         uint32_t(head_size_stride), uint32_t(32 / sizeof(scalar_t))); // 16
     constexpr uint32_t sg_tile_size_block =
@@ -1670,36 +1658,35 @@ private:
     rescale_expsum_load_tile_t mat_rescale;
     subgroup::tile_load(mat_rescale, rescale_load_payload);
     rescale_expsum_load_tile_t mat_exp_sum;
-    rescale_expsum_load_payload_t exp_sum_load_payload(slm_offset_exp_sum, 1,
-                                                       query_group_size, 1, 0, 0);
+    rescale_expsum_load_payload_t exp_sum_load_payload(
+        slm_offset_exp_sum, 1, query_group_size, 1, 0, 0);
     subgroup::tile_load(mat_exp_sum, exp_sum_load_payload);
 
-    accum_t rescale_factor = mat_rescale.reg.xetla_select<1, 1>(ctx.sg_id)[0];
-    accum_t exp_sum = mat_exp_sum.reg.xetla_select<1, 1>(ctx.sg_id)[0];
-    
-    sycl::ext::oneapi::experimental::printf("compute_out: sg_id: %d, kv_head_id: %d, rescale_factor: %f exp_sum: %f\n", 
-        ctx.sg_id, ctx.kv_head_id, rescale_factor, exp_sum);
+    mat_acc_old.reg =
+        mat_vec_mul_broadcast<accum_t, query_group_size, out_acc_tile_t, 0>(
+            mat_rescale.reg, mat_acc_old) +
+        cur_mat_acc_out.reg;
 
-    mat_acc_old.reg = mat_vec_mul_broadcast<accum_t, query_group_size,
-                                                  out_acc_tile_t, 0>(
-                              mat_rescale.reg, mat_acc_old) + cur_mat_acc_out.reg;
-    
     // store output to global for tmp debug
-    using out_st_payload_t = subgroup::mem_payload_t<
-        mem_desc_t<accum_t, mem_layout::row_major, mem_space::global>,
-        out_tile_desc_t, msg_type::block_2d, arch_tag>;
+    // using out_st_payload_t = subgroup::mem_payload_t<
+    //     mem_desc_t<accum_t, mem_layout::row_major, mem_space::global>,
+    //     out_tile_desc_t, msg_type::block_2d, arch_tag>;
 
-    uint32_t start_o_x = ctx.sg_id * head_size_per_sg + partition_idx * max_head_size;
-    uint32_t boundary_o_x = start_o_x + head_size_per_sg;
-    constexpr uint32_t boundary_o_y = query_group_size;
-    uint32_t pitch_o = ctx.max_num_partitions * max_head_size;
-    auto *cur_out = args.tem_out + ctx.seq_id * args.num_heads * max_head_size * ctx.max_num_partitions +
-                    ctx.kv_head_id * query_group_size * max_head_size * ctx.max_num_partitions;
+    // uint32_t start_o_x =
+    //     ctx.sg_id * head_size_per_sg + partition_idx * max_head_size;
+    // uint32_t boundary_o_x = start_o_x + head_size_per_sg;
+    // constexpr uint32_t boundary_o_y = query_group_size;
+    // uint32_t pitch_o = ctx.max_num_partitions * max_head_size;
+    // auto *cur_out =
+    //     args.tem_out +
+    //     ctx.seq_id * args.num_heads * max_head_size * ctx.max_num_partitions +
+    //     ctx.kv_head_id * query_group_size * max_head_size *
+    //         ctx.max_num_partitions;
 
-    out_st_payload_t out_st_payload(cur_out, boundary_o_x, boundary_o_y,
-                                    pitch_o, start_o_x, 0);
+    // out_st_payload_t out_st_payload(cur_out, boundary_o_x, boundary_o_y,
+    //                                 pitch_o, start_o_x, 0);
 
-    subgroup::tile_store(mat_acc_old, out_st_payload);
+    // subgroup::tile_store(mat_acc_old, out_st_payload);
   }
 
   // -------------------- // store_out // -------------------- //
@@ -1713,18 +1700,14 @@ private:
         mem_desc_t<accum_t, mem_layout::row_major, mem_space::local>,
         rescale_expsum_load_tile_desc_t, msg_type::block_1d, arch_tag>;
 
-    rescale_expsum_load_payload_t exp_sum_load_payload(slm_offset_exp_sum, 1,
-                                                       query_group_size, 1, 0, 0);
+    rescale_expsum_load_payload_t exp_sum_load_payload(
+        slm_offset_exp_sum, 1, query_group_size, 1, 0, 0);
     rescale_expsum_load_tile_t mat_exp_sum;
     subgroup::tile_load(mat_exp_sum, exp_sum_load_payload);
 
-    accum_t exp_sum = mat_exp_sum.reg.xetla_select<1, 1>(ctx.sg_id)[0];
-    sycl::ext::oneapi::experimental::printf("sg_id: %d, kv_head_id: %d, exp_sum: %f\n", 
-        ctx.sg_id, ctx.kv_head_id, exp_sum);
-    
-    // mat_acc_out.reg =
-    //     mat_vec_div_broadcast<accum_t, query_group_size, out_acc_tile_t, 0>(
-    //         mat_exp_sum.reg, mat_acc_out);
+    mat_acc_out.reg =
+        mat_vec_div_broadcast<accum_t, query_group_size, out_acc_tile_t, 0>(
+            mat_exp_sum.reg, mat_acc_out);
 
     out_tile_t mat_out;
     subgroup::elemwise_cvt(mat_out, mat_acc_out);
