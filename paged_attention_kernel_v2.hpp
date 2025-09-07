@@ -1509,8 +1509,6 @@ private:
         subgroup::tile_reduce<reduce_op::sum, accum_t, accum_t, 1>(
             sm_mat_score);
     accum_t scalar_sum = sum_score[0];
-    // with loop we don't need to do division every loop
-    // sm_mat_score.reg /= scalar_sum;
 
     // Store the softmax result back to shared local memory
     using softmax_exp_score_tile_t =
@@ -1547,10 +1545,7 @@ private:
     accum_t exp_sums_cur = rescale_factor * exp_sums_old + scalar_sum;
     max_logits_old = max_logits_cur;
     exp_sums_old = exp_sums_cur;
-
-    // sycl::ext::oneapi::experimental::printf("kv_head: %d, sg_id: %d, partition_idx: %d, rescale_factor: %f, exp_sums_cur: %f\n",
-    //     ctx.kv_head_id, ctx.sg_id, partition_idx, rescale_factor, exp_sums_cur);
-
+      
     // store rescale_factor and exp_sum into shared local memory for compute_out
     using rescale_expsum_tile_desc_t = subgroup::tile_desc_t<1, 1, 1, 1>;
     using rescale_expsum_tile_t =
@@ -1559,15 +1554,20 @@ private:
         mem_desc_t<accum_t, mem_layout::row_major, mem_space::local>,
         rescale_expsum_tile_desc_t, msg_type::block_1d, arch_tag>;
 
-    rescale_expsum_tile_t mat_rescale_expsum(rescale_factor);
+    rescale_expsum_tile_t mat_rescale(rescale_factor);
     rescale_expsum_payload_t rescale_factor_payload(
-        slm_offset_rescale_factors, 1, wg_size, 1, 0, ctx.sg_id);
-    subgroup::tile_store(mat_rescale_expsum, rescale_factor_payload);
+        slm_offset_rescale_factors, 1, query_group_size, 1, 0, ctx.sg_id);
+    subgroup::tile_store(mat_rescale, rescale_factor_payload);
 
-    mat_rescale_expsum.reg = exp_sums_cur;
-    rescale_expsum_payload_t exp_sum_payload(slm_offset_exp_sum, 1, wg_size, 1,
+    // mat_rescale.reg = exp_sums_old;
+    rescale_expsum_tile_t mat_exp_sum(exp_sums_old);
+    rescale_expsum_payload_t exp_sum_payload(slm_offset_exp_sum, 1, query_group_size, 1,
                                              0, ctx.sg_id);
-    subgroup::tile_store(mat_rescale_expsum, exp_sum_payload);
+    subgroup::tile_store(mat_exp_sum, exp_sum_payload);
+    accum_t tmp_exp_sum = mat_exp_sum.reg.xetla_select<1,1>(0)[0];
+    
+    sycl::ext::oneapi::experimental::printf("softmax: sg_id: %d, kv_head: %d, rescale: %f, exp_sum: %f\n",
+                                            ctx.sg_id, ctx.kv_head_id, rescale_factor, tmp_exp_sum);
 
     xetla_fence<memory_kind::shared_local>();
     if constexpr (wg_size > 1)
@@ -1583,7 +1583,7 @@ private:
   using out_tile_t = subgroup::tile_t<scalar_t, out_tile_desc_t>;
 
   // Compute output.
-  inline void compute_out(arguments_t &args, out_acc_tile_t &mat_acc_out,
+  inline void compute_out(arguments_t &args, out_acc_tile_t &mat_acc_old,
                             const int partition_idx) {
     constexpr uint32_t sg_tile_size_head = std::min(
         uint32_t(head_size_stride), uint32_t(32 / sizeof(scalar_t))); // 16
@@ -1622,6 +1622,7 @@ private:
 
     exp_score_tile_t mat_exp_score;
     value_tile_t mat_value;
+    out_acc_tile_t cur_mat_acc_out(0);
 
     const int start_block_idx = partition_idx * ctx.num_blocks_per_wg;
     const int end_block_idx =
@@ -1651,20 +1652,9 @@ private:
       exp_score_payload.template update_tdesc<exp_score_update_dir>(block_size);
 
       SW_BARRIER();
-      tile_mma::mma(mat_acc_out, mat_acc_out, mat_value, mat_exp_score);
+      tile_mma::mma(cur_mat_acc_out, cur_mat_acc_out, mat_value, mat_exp_score);
       SW_BARRIER();
     }
-
-
-    // load old output from slm
-    using out_old_load_payload_t = subgroup::mem_payload_t<
-        mem_desc_t<accum_t, mem_layout::row_major, mem_space::local>,
-        out_tile_desc_t, msg_type::block_1d, arch_tag>;
-    out_old_load_payload_t out_old_load_payload(
-        slm_offset_out_old, max_head_size, query_group_size, max_head_size,
-        ctx.sg_id * head_size_per_sg, 0);
-    out_acc_tile_t mat_acc_out_old;
-    subgroup::tile_load(mat_acc_out_old, out_old_load_payload);
 
     // load rescale_factor from slm
     using rescale_expsum_load_tile_desc_t =
@@ -1677,17 +1667,22 @@ private:
 
     rescale_expsum_load_payload_t rescale_load_payload(
         slm_offset_rescale_factors, 1, query_group_size, 1, 0, 0);
-    rescale_expsum_load_tile_t mat_rescale(0.1);
-    // subgroup::tile_load(mat_rescale, rescale_load_payload);
+    rescale_expsum_load_tile_t mat_rescale;
+    subgroup::tile_load(mat_rescale, rescale_load_payload);
+    rescale_expsum_load_tile_t mat_exp_sum;
+    rescale_expsum_load_payload_t exp_sum_load_payload(slm_offset_exp_sum, 1,
+                                                       query_group_size, 1, 0, 0);
+    subgroup::tile_load(mat_exp_sum, exp_sum_load_payload);
 
     accum_t rescale_factor = mat_rescale.reg.xetla_select<1, 1>(ctx.sg_id)[0];
-    sycl::ext::oneapi::experimental::printf("kv_head: %d, sg_id: %d, partition_idx: %d, rescale_factor: %f\n",
-        ctx.kv_head_id, ctx.sg_id, partition_idx, rescale_factor);
+    accum_t exp_sum = mat_exp_sum.reg.xetla_select<1, 1>(ctx.sg_id)[0];
+    
+    sycl::ext::oneapi::experimental::printf("compute_out: sg_id: %d, kv_head_id: %d, rescale_factor: %f exp_sum: %f\n", 
+        ctx.sg_id, ctx.kv_head_id, rescale_factor, exp_sum);
 
-    auto rescale_old_acc =
-        mat_vec_mul_broadcast<accum_t, query_group_size, out_acc_tile_t, 0>(
-            mat_rescale.reg, mat_acc_out_old);
-    mat_acc_out.reg = mat_acc_out.reg + rescale_old_acc;
+    mat_acc_old.reg = mat_vec_mul_broadcast<accum_t, query_group_size,
+                                                  out_acc_tile_t, 0>(
+                              mat_rescale.reg, mat_acc_old) + cur_mat_acc_out.reg;
     
     // store output to global for tmp debug
     using out_st_payload_t = subgroup::mem_payload_t<
@@ -1704,7 +1699,7 @@ private:
     out_st_payload_t out_st_payload(cur_out, boundary_o_x, boundary_o_y,
                                     pitch_o, start_o_x, 0);
 
-    subgroup::tile_store(mat_acc_out, out_st_payload);
+    subgroup::tile_store(mat_acc_old, out_st_payload);
   }
 
   // -------------------- // store_out // -------------------- //
@@ -1718,17 +1713,15 @@ private:
         mem_desc_t<accum_t, mem_layout::row_major, mem_space::local>,
         rescale_expsum_load_tile_desc_t, msg_type::block_1d, arch_tag>;
 
-    using exp_sum_load_payload_t = subgroup::mem_payload_t<
-        mem_desc_t<accum_t, mem_layout::row_major, mem_space::local>,
-        rescale_expsum_load_tile_desc_t, msg_type::block_1d, arch_tag>;
     rescale_expsum_load_payload_t exp_sum_load_payload(slm_offset_exp_sum, 1,
-                                                       wg_size, 1, 0, 0);
+                                                       query_group_size, 1, 0, 0);
     rescale_expsum_load_tile_t mat_exp_sum;
     subgroup::tile_load(mat_exp_sum, exp_sum_load_payload);
+
+    accum_t exp_sum = mat_exp_sum.reg.xetla_select<1, 1>(ctx.sg_id)[0];
+    sycl::ext::oneapi::experimental::printf("sg_id: %d, kv_head_id: %d, exp_sum: %f\n", 
+        ctx.sg_id, ctx.kv_head_id, exp_sum);
     
-    // accum_t exp_sum = mat_exp_sum.reg.xetla_select<1, 1>(ctx.sg_id)[0];
-    // sycl::ext::oneapi::experimental::printf("kv_head: %d, sg_id: %d, exp_sum: %f\n",
-    //     ctx.kv_head_id, ctx.sg_id, exp_sum);
     // mat_acc_out.reg =
     //     mat_vec_div_broadcast<accum_t, query_group_size, out_acc_tile_t, 0>(
     //         mat_exp_sum.reg, mat_acc_out);

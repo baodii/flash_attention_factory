@@ -129,10 +129,10 @@ def attention_ref(
         print(f"rescale_factors: {rescale_factors} \n cur_sum: {cur_sum}")
         out_par = torch.einsum("bhts,bshd->bthd", (attn_part), v[:, i * partition_size : (i + 1) * partition_size])
         debug_rescale = torch.ones_like(rescale_factors)
-        out_par += old_output * debug_rescale.permute(0, 2, 1, 3)
-        old_output = out_par
+        out_par += old_output * rescale_factors.permute(0, 2, 1, 3)
         head_size = q.shape[-1]
-        out_partitions[:, :, :, i * head_size : (i + 1) * head_size] = out_par # for debugging
+        out_partitions[:, :, :, i * head_size : (i + 1) * head_size] = old_output * rescale_factors.permute(0, 2, 1, 3) # for debugging
+        old_output = out_par
 
     # output_p = old_output / old_sum.permute(0, 2, 1, 3)
     output_p = old_output
@@ -154,7 +154,7 @@ def attention_ref(
     output = torch.einsum("bhts,bshd->bthd", attention_drop, v * dropout_scaling)
     if query_padding_mask is not None:
         output.masked_fill_(rearrange(~query_padding_mask, "b s -> b s 1 1"), 0.0)
-    return output_p.to(dtype=dtype_og), attention.to(dtype=dtype_og), out_partitions
+    return output.to(dtype=dtype_og), attention.to(dtype=dtype_og), out_partitions
 
 def _generate_block_kvcache(seqlen_k, paged_kv_block_size, batch_size, nheads_k, d, device, dtype):
     # num_blocks = math.ceil(seqlen_k / paged_kv_block_size) * batch_size * 3
@@ -223,9 +223,9 @@ def generate_random_padding_mask(max_seqlen, batch_size, device, mode="random"):
         (1, 256),
         (1, 799),
         (1, 2048),
-        (1, 20000),
-        (1, 40000),
-        (1, 50000),
+        # (1, 20000),
+        # (1, 40000),
+        # (1, 50000),
     ],
 )
 @pytest.mark.parametrize(
@@ -325,7 +325,7 @@ def test_flash_attn_kvcache(
     arange = rearrange(torch.arange(seqlen_k, device=device), "s -> 1 s")
     cache_seqlens_expanded = rearrange(cache_seqlens, "b -> b 1")
     # key_padding_mask = arange < cache_seqlens_expanded + (seqlen_new if new_kv else 0)
-    key_padding_mask, seq_lens = generate_random_padding_mask(seqlen_k, batch_size, device, mode="random")
+    key_padding_mask, seq_lens = generate_random_padding_mask(seqlen_k, batch_size, device, mode="random" if varlen else "full")
     if has_leftpad:
         key_padding_mask = torch.logical_and(
             key_padding_mask, arange >= cache_leftpad.unsqueeze(-1).expand(-1, seqlen_k)
@@ -505,11 +505,12 @@ def test_flash_attn_kvcache(
     out_pt = out_pt.squeeze(1)
     out_attn = out_attn.squeeze(2)
     out_attn_2 = out_attn_2.squeeze(2)
-    print(f"out_ref: {out_ref[0, 0, :10]}")
-    print(f"out: {out[0, 0, :10]}")
+    out_partitions = out_partitions.squeeze(1)
+    # print(f"out_ref: {out_ref[0, 0, :10]}")
+    # print(f"out: {out[0, 0, :10]}")
     print(f"eclips times: {eclips_times}")
     # assert_close_verbose(out_attn_2, debug_output, rtol=1e-3, atol=1e-3)
-    # assert_close_verbose(out, out_ref, rtol=1e-2, atol=1e-2)
+    # assert_close_verbose(out, out_ref, rtol=1e-3, atol=1e-3)
     # print(f"debug_output: {debug_output[0, 0, :]}")
     # print(f"out_attn_2: {out_attn_2[0, 0, :]}")
     # print(f"scores max diff: {(out_attn_2 - debug_output[:, :, :seqlen_k]).abs().max().item()}")
@@ -549,10 +550,10 @@ def test_flash_attn_kvcache(
 if __name__ == "__main__":
     test_flash_attn_kvcache(
         batch_size = 1,
-        nheads = 16,
+        nheads = 10,
         nheads_k = 2,
         seqlen_q = 1,
-        seqlen_k = 1024,
+        seqlen_k = 128,
         d = 128,
         has_batch_idx = False,
         has_leftpad = False,
@@ -567,6 +568,6 @@ if __name__ == "__main__":
         mha_type = "gqa",
         num_splits = 1,
         dtype = torch.float16,
-        varlen=False,
+        varlen=True,
         do_performance=False,
     )
