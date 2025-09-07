@@ -591,17 +591,17 @@ private:
       ctx.nbarrier.arrive_wait();
 
     // store tem_out for softmax check
-    auto *cur_tem_out =
-        args.tem_out +
-        ctx.seq_id * args.num_heads * ctx.max_num_partitions * partition_size +
-        ctx.kv_head_id * query_group_size * ctx.max_num_partitions *
-            partition_size;
-    uint32_t start_tem_x = ctx.partition_id * partition_size;
-    uint32_t boundary_tem_x = start_tem_x + partition_size;
-    tem_global_st_payload_t tem_out_st_payload(
-        cur_tem_out, boundary_tem_x, query_group_size,
-        ctx.max_num_partitions * partition_size, start_tem_x, ctx.sg_id);
-    subgroup::tile_store(sm_mat_exp_score, tem_out_st_payload);
+    // auto *cur_tem_out =
+    //     args.tem_out +
+    //     ctx.seq_id * args.num_heads * ctx.max_num_partitions * partition_size +
+    //     ctx.kv_head_id * query_group_size * ctx.max_num_partitions *
+    //         partition_size;
+    // uint32_t start_tem_x = ctx.partition_id * partition_size;
+    // uint32_t boundary_tem_x = start_tem_x + partition_size;
+    // tem_global_st_payload_t tem_out_st_payload(
+    //     cur_tem_out, boundary_tem_x, query_group_size,
+    //     ctx.max_num_partitions * partition_size, start_tem_x, ctx.sg_id);
+    // subgroup::tile_store(sm_mat_exp_score, tem_out_st_payload);
 
     // Store max and sum
     using scalar_tile_desc_t = subgroup::tile_desc_t<1, 1, 1, 1>;
@@ -1513,22 +1513,6 @@ private:
                                                 partition_size, 0, start_y);
       subgroup::tile_store(sm_mat_exp_score, sm_local_st_payload);
       
-      // store tem_out for softmax check
-      // auto* cur_tem_out = args.tem_out + ctx.seq_id * args.num_heads *
-      // ctx.max_num_partitions * partition_size +
-      //     ctx.kv_head_id * query_group_size * ctx.max_num_partitions *
-      //     partition_size;
-      // uint32_t start_tem_x = partition_idx * partition_size;
-      // uint32_t boundary_tem_x = start_tem_x + partition_size;
-      // tem_global_st_payload_t tem_out_st_payload(
-      //     cur_tem_out,
-      //     boundary_tem_x,
-      //     query_group_size,
-      //     ctx.max_num_partitions * partition_size,
-      //     start_tem_x,
-      //     ctx.sg_id);
-      // subgroup::tile_store(sm_mat_exp_score, tem_out_st_payload);
-
       // update max and sum
       accum_t rescale_factor = std::exp(max_logits_old - max_logits_cur);
       accum_t exp_sums_cur = rescale_factor * exp_sums_old + scalar_sum;
@@ -1549,7 +1533,6 @@ private:
           slm_offset_rescale_factors, 1, query_group_size, 1, 0, ctx.sg_id);
       subgroup::tile_store(mat_rescale, rescale_factor_payload);
 
-      // mat_rescale.reg = exp_sums_old;
       rescale_expsum_tile_t mat_exp_sum(exp_sums_old);
       rescale_expsum_payload_t exp_sum_payload(
           slm_offset_exp_sum, 1, query_group_size, 1, 0, ctx.sg_id);
@@ -1666,27 +1649,6 @@ private:
         mat_vec_mul_broadcast<accum_t, query_group_size, out_acc_tile_t, 0>(
             mat_rescale.reg, mat_acc_old) +
         cur_mat_acc_out.reg;
-
-    // store output to global for tmp debug
-    // using out_st_payload_t = subgroup::mem_payload_t<
-    //     mem_desc_t<accum_t, mem_layout::row_major, mem_space::global>,
-    //     out_tile_desc_t, msg_type::block_2d, arch_tag>;
-
-    // uint32_t start_o_x =
-    //     ctx.sg_id * head_size_per_sg + partition_idx * max_head_size;
-    // uint32_t boundary_o_x = start_o_x + head_size_per_sg;
-    // constexpr uint32_t boundary_o_y = query_group_size;
-    // uint32_t pitch_o = ctx.max_num_partitions * max_head_size;
-    // auto *cur_out =
-    //     args.tem_out +
-    //     ctx.seq_id * args.num_heads * max_head_size * ctx.max_num_partitions +
-    //     ctx.kv_head_id * query_group_size * max_head_size *
-    //         ctx.max_num_partitions;
-
-    // out_st_payload_t out_st_payload(cur_out, boundary_o_x, boundary_o_y,
-    //                                 pitch_o, start_o_x, 0);
-
-    // subgroup::tile_store(mat_acc_old, out_st_payload);
   }
 
   // -------------------- // store_out // -------------------- //

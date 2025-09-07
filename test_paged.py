@@ -126,7 +126,7 @@ def attention_ref(
         cur_sum = rescale_factors * old_sum + torch.sum(attn_part, dim=-1, keepdim=True)
         old_max = cur_max
         old_sum = cur_sum
-        print(f"rescale_factors: {rescale_factors} \n cur_sum: {cur_sum}")
+        # print(f"rescale_factors: {rescale_factors} \n cur_sum: {cur_sum}")
         out_par = torch.einsum("bhts,bshd->bthd", (attn_part), v[:, i * partition_size : (i + 1) * partition_size])
         debug_rescale = torch.ones_like(rescale_factors)
         out_par += old_output * rescale_factors.permute(0, 2, 1, 3)
@@ -465,9 +465,50 @@ def test_flash_attn_kvcache(
         num_kv = 50
         k_caches = list()
         v_caches = list()
+        total_eclips_times = list()
         for i in range(num_kv):
             k_caches.append(k_cache_paged.clone())
             v_caches.append(v_cache_paged.clone())
+        for i in range(num_iters + num_warm):
+            cur_idx = int(i % num_kv)
+            eclips_times = paged_attention.run_loop(
+                max_logits,
+                exp_sums,
+                tem_output,
+                out,
+                debug_output,
+                query,
+                k_caches[cur_idx],
+                v_caches[cur_idx],
+                block_table,
+                context_lens,
+                num_queries_per_token,
+                sm_scale,
+                paged_kv_block_size,
+                seqlen_k,
+                alibi_slopes,
+                softcat
+            )
+            attn_time = eclips_times[0]
+            reduce_time = eclips_times[1] if len(eclips_times) > 1 else 0
+            # reduce_time = 0
+            total_time = attn_time + reduce_time
+            total_kv_size = k_cache_paged.numel() * k_cache_paged.element_size() * 2
+            if i >= num_warm:
+                # print(
+                #     f"Iter {i - num_warm + 1}, "
+                #     f"Time: {total_time:.2f} us, "
+                #     f"Attn: {attn_time:.2f} us, "
+                #     f"Reduce: {reduce_time:.2f} us, "
+                #     f"Total KV size: {total_kv_size / (1024 * 1024):.2f} MB, "
+                #     f"Bandwidth: {total_kv_size / total_time / (1000):.2f} GB/s"
+                # )
+                total_eclips_times.append(total_time)
+
+        total_kv_size = k_cache_paged.numel() * k_cache_paged.element_size() * 2
+        avg_time = sum(total_eclips_times) / len(total_eclips_times)
+        print(f"...loop: Avg time: {avg_time:.2f} us, Avg bandwidth: {total_kv_size / avg_time / (1000):.2f} GB/s")
+
         for i in range(num_iters + num_warm):
             cur_idx = int(i % num_kv)
             eclips_times = paged_attention.run(
@@ -489,18 +530,24 @@ def test_flash_attn_kvcache(
                 softcat
             )
             attn_time = eclips_times[0]
-            reduce_time = eclips_times[1]
+            reduce_time = eclips_times[1] if len(eclips_times) > 1 else 0
+            # reduce_time = 0
             total_time = attn_time + reduce_time
             total_kv_size = k_cache_paged.numel() * k_cache_paged.element_size() * 2
             if i >= num_warm:
-                print(
-                    f"Iter {i - num_warm + 1}, "
-                    f"Time: {total_time:.2f} us, "
-                    f"Attn: {attn_time:.2f} us, "
-                    f"Reduce: {reduce_time:.2f} us, "
-                    f"Total KV size: {total_kv_size / (1024 * 1024):.2f} MB, "
-                    f"Bandwidth: {total_kv_size / total_time / (1000):.2f} GB/s"
-                )
+                # print(
+                #     f"Iter {i - num_warm + 1}, "
+                #     f"Time: {total_time:.2f} us, "
+                #     f"Attn: {attn_time:.2f} us, "
+                #     f"Reduce: {reduce_time:.2f} us, "
+                #     f"Total KV size: {total_kv_size / (1024 * 1024):.2f} MB, "
+                #     f"Bandwidth: {total_kv_size / total_time / (1000):.2f} GB/s"
+                # )
+                total_eclips_times.append(total_time)
+
+        total_kv_size = k_cache_paged.numel() * k_cache_paged.element_size() * 2
+        avg_time = sum(total_eclips_times) / len(total_eclips_times)
+        print(f"...split: Avg time: {avg_time:.2f} us, Avg bandwidth: {total_kv_size / avg_time / (1000):.2f} GB/s")
     out_ref = out_ref.squeeze(1)
     out_pt = out_pt.squeeze(1)
     out_attn = out_attn.squeeze(2)
@@ -549,11 +596,11 @@ def test_flash_attn_kvcache(
 
 if __name__ == "__main__":
     test_flash_attn_kvcache(
-        batch_size = 1,
-        nheads = 10,
+        batch_size = 32,
+        nheads = 16,
         nheads_k = 2,
         seqlen_q = 1,
-        seqlen_k = 128,
+        seqlen_k = 1024,
         d = 128,
         has_batch_idx = False,
         has_leftpad = False,
@@ -569,5 +616,5 @@ if __name__ == "__main__":
         num_splits = 1,
         dtype = torch.float16,
         varlen=True,
-        do_performance=False,
+        do_performance=True,
     )
