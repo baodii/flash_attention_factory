@@ -588,7 +588,7 @@ if __name__ == "__main__":
         nheads_k = 2,
         seqlen_q = 1,
         seqlen_k = 2048,
-        d = 64,
+        d = 128,
         has_batch_idx = False,
         has_leftpad = False,
         paged_kv_block_size = 64,

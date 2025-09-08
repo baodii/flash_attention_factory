@@ -75,7 +75,7 @@ inline auto launch_paged_attn_v2(float *max_logits, float *exp_sums, T *out,
 }
 
 template <uint32_t head_size, uint32_t block_size, uint32_t query_group_size,
-          uint32_t partition_size, typename T, typename U, gpu_arch arch_tag>
+          typename T, typename U, gpu_arch arch_tag>
 inline auto launch_paged_attn_loop(float *max_logits, float *exp_sums, T *out,
                                    T *tem_out, T *query, T *key_cache,
                                    T *value_cache, float *alibi_slopes,
@@ -84,8 +84,8 @@ inline auto launch_paged_attn_loop(float *max_logits, float *exp_sums, T *out,
                                    float sm_scale, uint32_t num_seqs,
                                    uint32_t num_heads, uint32_t num_kv_heads,
                                    uint32_t max_blocks_per_seq, float softcap) {
-  using policy = paged_attention_policy_loop<head_size, block_size,
-                                             query_group_size, partition_size>;
+  using policy =
+      paged_attention_policy_loop<head_size, block_size, query_group_size>;
   using kernel = paged_attention_loop_kernel<policy, T, U, arch_tag>;
 
   sycl::nd_range<3> nd_range = kernel::get_nd_range(num_seqs, num_kv_heads);
@@ -111,76 +111,6 @@ inline auto launch_paged_attn_loop(float *max_logits, float *exp_sums, T *out,
   event1.wait();
 
   return std::vector<float>{get_exe_time(event1)}; // return execution times
-}
-
-template <uint32_t head_size, uint32_t block_size, uint32_t query_group_size,
-          typename T, typename U, gpu_arch arch_tag>
-inline auto switch_partition_paged_attn_loop(
-    float *max_logits, float *exp_sums, T *out, T *tem_out, T *query,
-    T *key_cache, T *value_cache, float *alibi_slopes, float *debug_out,
-    U *block_tables, U *context_lens, uint32_t max_num_partitions,
-    float sm_scale, uint32_t num_seqs, uint32_t num_heads,
-    uint32_t num_kv_heads, uint32_t max_blocks_per_seq, float softcap) {
-  switch (max_num_partitions) {
-  case 1:
-    return launch_paged_attn_loop<head_size, block_size, query_group_size, 1, T,
-                                  U, arch_tag>(
-        max_logits, exp_sums, out, tem_out, query, key_cache, value_cache,
-        alibi_slopes, debug_out, block_tables, context_lens, max_num_partitions,
-        sm_scale, num_seqs, num_heads, num_kv_heads, max_blocks_per_seq,
-        softcap);
-  case 2:
-    return launch_paged_attn_loop<head_size, block_size, query_group_size, 2, T,
-                                  U, arch_tag>(
-        max_logits, exp_sums, out, tem_out, query, key_cache, value_cache,
-        alibi_slopes, debug_out, block_tables, context_lens, max_num_partitions,
-        sm_scale, num_seqs, num_heads, num_kv_heads, max_blocks_per_seq,
-        softcap);
-  case 3:
-    return launch_paged_attn_loop<head_size, block_size, query_group_size, 3, T,
-                                  U, arch_tag>(
-        max_logits, exp_sums, out, tem_out, query, key_cache, value_cache,
-        alibi_slopes, debug_out, block_tables, context_lens, max_num_partitions,
-        sm_scale, num_seqs, num_heads, num_kv_heads, max_blocks_per_seq,
-        softcap);
-  case 4:
-    return launch_paged_attn_loop<head_size, block_size, query_group_size, 4, T,
-                                  U, arch_tag>(
-        max_logits, exp_sums, out, tem_out, query, key_cache, value_cache,
-        alibi_slopes, debug_out, block_tables, context_lens, max_num_partitions,
-        sm_scale, num_seqs, num_heads, num_kv_heads, max_blocks_per_seq,
-        softcap);
-  case 5:
-    return launch_paged_attn_loop<head_size, block_size, query_group_size, 5, T,
-                                  U, arch_tag>(
-        max_logits, exp_sums, out, tem_out, query, key_cache, value_cache,
-        alibi_slopes, debug_out, block_tables, context_lens, max_num_partitions,
-        sm_scale, num_seqs, num_heads, num_kv_heads, max_blocks_per_seq,
-        softcap);
-  case 6:
-    return launch_paged_attn_loop<head_size, block_size, query_group_size, 6, T,
-                                  U, arch_tag>(
-        max_logits, exp_sums, out, tem_out, query, key_cache, value_cache,
-        alibi_slopes, debug_out, block_tables, context_lens, max_num_partitions,
-        sm_scale, num_seqs, num_heads, num_kv_heads, max_blocks_per_seq,
-        softcap);
-  case 7:
-    return launch_paged_attn_loop<head_size, block_size, query_group_size, 7, T,
-                                  U, arch_tag>(
-        max_logits, exp_sums, out, tem_out, query, key_cache, value_cache,
-        alibi_slopes, debug_out, block_tables, context_lens, max_num_partitions,
-        sm_scale, num_seqs, num_heads, num_kv_heads, max_blocks_per_seq,
-        softcap);
-  case 8:
-    return launch_paged_attn_loop<head_size, block_size, query_group_size, 8, T,
-                                  U, arch_tag>(
-        max_logits, exp_sums, out, tem_out, query, key_cache, value_cache,
-        alibi_slopes, debug_out, block_tables, context_lens, max_num_partitions,
-        sm_scale, num_seqs, num_heads, num_kv_heads, max_blocks_per_seq,
-        softcap);
-  default:
-    throw std::runtime_error("Unsupported number of partitions");
-  }
 }
 
 template <typename T, typename U, gpu_arch arch_tag>
@@ -313,49 +243,49 @@ inline auto dispatch_paged_attention_loop(
   if (head_size == 128 && block_size == 64) {
     switch (num_queries_per_tokens) {
     case 1:
-      return switch_partition_paged_attn_loop<128, 64, 1, T, U, arch_tag>(
+      return launch_paged_attn_loop<128, 64, 1, T, U, arch_tag>(
           max_logits, exp_sums, out, tem_out, query, key_cache, value_cache,
           alibi_slopes, debug_out, block_tables, context_lens,
           max_num_partitions, sm_scale, num_seqs, num_heads, num_kv_heads,
           max_blocks_per_seq, softcap);
     case 2:
-      return switch_partition_paged_attn_loop<128, 64, 2, T, U, arch_tag>(
+      return launch_paged_attn_loop<128, 64, 2, T, U, arch_tag>(
           max_logits, exp_sums, out, tem_out, query, key_cache, value_cache,
           alibi_slopes, debug_out, block_tables, context_lens,
           max_num_partitions, sm_scale, num_seqs, num_heads, num_kv_heads,
           max_blocks_per_seq, softcap);
     case 3:
-      return switch_partition_paged_attn_loop<128, 64, 3, T, U, arch_tag>(
+      return launch_paged_attn_loop<128, 64, 3, T, U, arch_tag>(
           max_logits, exp_sums, out, tem_out, query, key_cache, value_cache,
           alibi_slopes, debug_out, block_tables, context_lens,
           max_num_partitions, sm_scale, num_seqs, num_heads, num_kv_heads,
           max_blocks_per_seq, softcap);
     case 4:
-      return switch_partition_paged_attn_loop<128, 64, 4, T, U, arch_tag>(
+      return launch_paged_attn_loop<128, 64, 4, T, U, arch_tag>(
           max_logits, exp_sums, out, tem_out, query, key_cache, value_cache,
           alibi_slopes, debug_out, block_tables, context_lens,
           max_num_partitions, sm_scale, num_seqs, num_heads, num_kv_heads,
           max_blocks_per_seq, softcap);
     case 5:
-      return switch_partition_paged_attn_loop<128, 64, 5, T, U, arch_tag>(
+      return launch_paged_attn_loop<128, 64, 5, T, U, arch_tag>(
           max_logits, exp_sums, out, tem_out, query, key_cache, value_cache,
           alibi_slopes, debug_out, block_tables, context_lens,
           max_num_partitions, sm_scale, num_seqs, num_heads, num_kv_heads,
           max_blocks_per_seq, softcap);
     case 6:
-      return switch_partition_paged_attn_loop<128, 64, 6, T, U, arch_tag>(
+      return launch_paged_attn_loop<128, 64, 6, T, U, arch_tag>(
           max_logits, exp_sums, out, tem_out, query, key_cache, value_cache,
           alibi_slopes, debug_out, block_tables, context_lens,
           max_num_partitions, sm_scale, num_seqs, num_heads, num_kv_heads,
           max_blocks_per_seq, softcap);
     case 7:
-      return switch_partition_paged_attn_loop<128, 64, 7, T, U, arch_tag>(
+      return launch_paged_attn_loop<128, 64, 7, T, U, arch_tag>(
           max_logits, exp_sums, out, tem_out, query, key_cache, value_cache,
           alibi_slopes, debug_out, block_tables, context_lens,
           max_num_partitions, sm_scale, num_seqs, num_heads, num_kv_heads,
           max_blocks_per_seq, softcap);
     case 8:
-      return switch_partition_paged_attn_loop<128, 64, 8, T, U, arch_tag>(
+      return launch_paged_attn_loop<128, 64, 8, T, U, arch_tag>(
           max_logits, exp_sums, out, tem_out, query, key_cache, value_cache,
           alibi_slopes, debug_out, block_tables, context_lens,
           max_num_partitions, sm_scale, num_seqs, num_heads, num_kv_heads,
@@ -366,49 +296,49 @@ inline auto dispatch_paged_attention_loop(
   } else if (head_size == 64 && block_size == 64) {
     switch (num_queries_per_tokens) {
     case 1:
-      return switch_partition_paged_attn_loop<64, 64, 1, T, U, arch_tag>(
+      return launch_paged_attn_loop<64, 64, 1, T, U, arch_tag>(
           max_logits, exp_sums, out, tem_out, query, key_cache, value_cache,
           alibi_slopes, debug_out, block_tables, context_lens,
           max_num_partitions, sm_scale, num_seqs, num_heads, num_kv_heads,
           max_blocks_per_seq, softcap);
     case 2:
-      return switch_partition_paged_attn_loop<64, 64, 2, T, U, arch_tag>(
+      return launch_paged_attn_loop<64, 64, 2, T, U, arch_tag>(
           max_logits, exp_sums, out, tem_out, query, key_cache, value_cache,
           alibi_slopes, debug_out, block_tables, context_lens,
           max_num_partitions, sm_scale, num_seqs, num_heads, num_kv_heads,
           max_blocks_per_seq, softcap);
     case 3:
-      return switch_partition_paged_attn_loop<64, 64, 3, T, U, arch_tag>(
+      return launch_paged_attn_loop<64, 64, 3, T, U, arch_tag>(
           max_logits, exp_sums, out, tem_out, query, key_cache, value_cache,
           alibi_slopes, debug_out, block_tables, context_lens,
           max_num_partitions, sm_scale, num_seqs, num_heads, num_kv_heads,
           max_blocks_per_seq, softcap);
     case 4:
-      return switch_partition_paged_attn_loop<64, 64, 4, T, U, arch_tag>(
+      return launch_paged_attn_loop<64, 64, 4, T, U, arch_tag>(
           max_logits, exp_sums, out, tem_out, query, key_cache, value_cache,
           alibi_slopes, debug_out, block_tables, context_lens,
           max_num_partitions, sm_scale, num_seqs, num_heads, num_kv_heads,
           max_blocks_per_seq, softcap);
     case 5:
-      return switch_partition_paged_attn_loop<64, 64, 5, T, U, arch_tag>(
+      return launch_paged_attn_loop<64, 64, 5, T, U, arch_tag>(
           max_logits, exp_sums, out, tem_out, query, key_cache, value_cache,
           alibi_slopes, debug_out, block_tables, context_lens,
           max_num_partitions, sm_scale, num_seqs, num_heads, num_kv_heads,
           max_blocks_per_seq, softcap);
     case 6:
-      return switch_partition_paged_attn_loop<64, 64, 6, T, U, arch_tag>(
+      return launch_paged_attn_loop<64, 64, 6, T, U, arch_tag>(
           max_logits, exp_sums, out, tem_out, query, key_cache, value_cache,
           alibi_slopes, debug_out, block_tables, context_lens,
           max_num_partitions, sm_scale, num_seqs, num_heads, num_kv_heads,
           max_blocks_per_seq, softcap);
     case 7:
-      return switch_partition_paged_attn_loop<64, 64, 7, T, U, arch_tag>(
+      return launch_paged_attn_loop<64, 64, 7, T, U, arch_tag>(
           max_logits, exp_sums, out, tem_out, query, key_cache, value_cache,
           alibi_slopes, debug_out, block_tables, context_lens,
           max_num_partitions, sm_scale, num_seqs, num_heads, num_kv_heads,
           max_blocks_per_seq, softcap);
     case 8:
-      return switch_partition_paged_attn_loop<64, 64, 8, T, U, arch_tag>(
+      return launch_paged_attn_loop<64, 64, 8, T, U, arch_tag>(
           max_logits, exp_sums, out, tem_out, query, key_cache, value_cache,
           alibi_slopes, debug_out, block_tables, context_lens,
           max_num_partitions, sm_scale, num_seqs, num_heads, num_kv_heads,

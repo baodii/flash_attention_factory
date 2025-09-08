@@ -1221,7 +1221,6 @@ private:
   static constexpr uint32_t head_size_stride = policy::head_size_stride;
   static constexpr uint32_t max_blocks_per_sg = policy::max_blocks_per_sg;
   static constexpr uint32_t query_group_size = policy::query_group_size;
-  static constexpr uint32_t num_loop = policy::num_loop;
   static constexpr uint32_t rows_per_sg =
       DIVIDE_ROUND_UP(query_group_size, wg_size);
 
@@ -1741,7 +1740,7 @@ public:
 
     out_acc_tile_t mat_out_acc(0.0f);
 
-    for (int p_id = 0; p_id < num_loop; p_id++) {
+    for (int p_id = 0; p_id < ctx.max_num_partitions; p_id++) {
       compute_score(args, p_id);
       softmax(args, max_logits_old, exp_sums_old, p_id);
       compute_out(args, mat_out_acc, p_id);
