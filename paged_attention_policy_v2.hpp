@@ -4,7 +4,7 @@
 
 struct paged_attention_base_policy {
   static constexpr uint32_t stages = 3;
-  static constexpr uint32_t head_size_stride = 32;
+  static constexpr uint32_t head_size_stride = 16;
 };
 
 template <
@@ -55,7 +55,7 @@ struct paged_attention_policy_v2<64, block_size_, query_group_size_> : paged_att
       partition_size / (block_size * wg_size);
   // for reduction kernel
   static constexpr uint32_t partition_stride = 8;
-  static constexpr uint32_t max_partitions_per_sg = 8;
+  static constexpr uint32_t max_partitions_per_sg = 16;
   static_assert(
       partition_size % (block_size * wg_size) == 0,
       "partition_size should be a multiple of block_size * wg_size");

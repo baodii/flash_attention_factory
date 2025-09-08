@@ -583,11 +583,11 @@ def test_flash_attn_kvcache(
 
 if __name__ == "__main__":
     test_flash_attn_kvcache(
-        batch_size = 32,
-        nheads = 16,
+        batch_size = 64,
+        nheads = 10,
         nheads_k = 2,
         seqlen_q = 1,
-        seqlen_k = 2048,
+        seqlen_k = 1024,
         d = 128,
         has_batch_idx = False,
         has_leftpad = False,

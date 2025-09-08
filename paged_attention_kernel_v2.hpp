@@ -1242,8 +1242,6 @@ private:
       query_group_size * sizeof(accum_t);
   static constexpr uint32_t slm_size_exp_sum =
       query_group_size * sizeof(accum_t);
-  static constexpr uint32_t slm_size_out_old =
-      query_group_size * max_head_size * sizeof(accum_t);
 
   static constexpr uint32_t slm_offset_score = 0;
   static constexpr uint32_t slm_offset_exp_score =
@@ -1252,8 +1250,6 @@ private:
       slm_offset_exp_score + slm_size_exp_score;
   static constexpr uint32_t slm_offset_exp_sum =
       slm_offset_rescale_factors + slm_size_rescale_factors;
-  static constexpr uint32_t slm_offset_out_old =
-      slm_offset_exp_sum + slm_size_exp_sum;
 
   static constexpr uint32_t nbarrier_cnt = (wg_size > 1) ? 1 : 0;
   // This boolean variable will determine whether the kernel will execute 2d
@@ -1646,10 +1642,6 @@ private:
         slm_offset_rescale_factors, 1, query_group_size, 1, 0, 0);
     rescale_expsum_load_tile_t mat_rescale;
     subgroup::tile_load(mat_rescale, rescale_load_payload);
-    rescale_expsum_load_tile_t mat_exp_sum;
-    rescale_expsum_load_payload_t exp_sum_load_payload(
-        slm_offset_exp_sum, 1, query_group_size, 1, 0, 0);
-    subgroup::tile_load(mat_exp_sum, exp_sum_load_payload);
 
     mat_acc_old.reg =
         mat_vec_mul_broadcast<accum_t, query_group_size, out_acc_tile_t, 0>(
@@ -1701,8 +1693,7 @@ public:
   // Get the local memory size consumption.
   inline static constexpr uint32_t get_slm_size() {
     constexpr uint32_t size = slm_size_score + slm_size_exp_score +
-                              slm_size_exp_sum + slm_size_rescale_factors +
-                              slm_size_out_old;
+                              slm_size_exp_sum + slm_size_rescale_factors;
     static_assert(size <= (128 * 1024),
                   "The local memory size should be less than 128KB!");
     return size;
