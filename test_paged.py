@@ -212,7 +212,7 @@ def generate_random_padding_mask(max_seqlen, batch_size, device, mode="random"):
 @pytest.mark.parametrize("has_leftpad", [False])
 @pytest.mark.parametrize("has_batch_idx", [False])
 @pytest.mark.parametrize("varlen", [False, True])
-@pytest.mark.parametrize("d", [128])
+@pytest.mark.parametrize("d", [128, 64])
 @pytest.mark.parametrize(
     "seqlen_q,seqlen_k",
     [
@@ -222,7 +222,7 @@ def generate_random_padding_mask(max_seqlen, batch_size, device, mode="random"):
         (1, 800),
         (1, 256),
         (1, 799),
-        (1, 2048),
+        # (1, 2048),
         # (1, 20000),
         # (1, 40000),
         # (1, 50000),
@@ -394,6 +394,9 @@ def test_flash_attn_kvcache(
         v_cache_ref[update_mask] = rearrange(v, "b s ... -> (b s) ...")
     k_cache_rep = repeat(k_cache_ref, "b s h d -> b s (h g) d", g=nheads // nheads_k)
     v_cache_rep = repeat(v_cache_ref, "b s h d -> b s (h g) d", g=nheads // nheads_k)
+
+    wg_size = int(d / 16)
+    partition_size = int(wg_size * paged_kv_block_size)
     out_ref, out_attn, out_partitions = attention_ref(
         q_ro,
         k_cache_rep,
@@ -423,7 +426,6 @@ def test_flash_attn_kvcache(
         key_leftpad=cache_leftpad,
     )
 
-    partition_size = 512
     num_partitions = int((seqlen_k + partition_size - 1) / partition_size)
     max_logits = torch.empty((batch_size, nheads, num_partitions), dtype=torch.float32, device=device)
     exp_sums = torch.empty_like(max_logits)
@@ -509,45 +511,45 @@ def test_flash_attn_kvcache(
         avg_time = sum(total_eclips_times) / len(total_eclips_times)
         print(f"...loop: Avg time: {avg_time:.2f} us, Avg bandwidth: {total_kv_size / avg_time / (1000):.2f} GB/s")
 
-        for i in range(num_iters + num_warm):
-            cur_idx = int(i % num_kv)
-            eclips_times = paged_attention.run(
-                max_logits,
-                exp_sums,
-                tem_output,
-                out,
-                debug_output,
-                query,
-                k_caches[cur_idx],
-                v_caches[cur_idx],
-                block_table,
-                context_lens,
-                num_queries_per_token,
-                sm_scale,
-                paged_kv_block_size,
-                seqlen_k,
-                alibi_slopes,
-                softcat
-            )
-            attn_time = eclips_times[0]
-            reduce_time = eclips_times[1] if len(eclips_times) > 1 else 0
-            # reduce_time = 0
-            total_time = attn_time + reduce_time
-            total_kv_size = k_cache_paged.numel() * k_cache_paged.element_size() * 2
-            if i >= num_warm:
-                # print(
-                #     f"Iter {i - num_warm + 1}, "
-                #     f"Time: {total_time:.2f} us, "
-                #     f"Attn: {attn_time:.2f} us, "
-                #     f"Reduce: {reduce_time:.2f} us, "
-                #     f"Total KV size: {total_kv_size / (1024 * 1024):.2f} MB, "
-                #     f"Bandwidth: {total_kv_size / total_time / (1000):.2f} GB/s"
-                # )
-                total_eclips_times.append(total_time)
+        # for i in range(num_iters + num_warm):
+        #     cur_idx = int(i % num_kv)
+        #     eclips_times = paged_attention.run(
+        #         max_logits,
+        #         exp_sums,
+        #         tem_output,
+        #         out,
+        #         debug_output,
+        #         query,
+        #         k_caches[cur_idx],
+        #         v_caches[cur_idx],
+        #         block_table,
+        #         context_lens,
+        #         num_queries_per_token,
+        #         sm_scale,
+        #         paged_kv_block_size,
+        #         seqlen_k,
+        #         alibi_slopes,
+        #         softcat
+        #     )
+        #     attn_time = eclips_times[0]
+        #     reduce_time = eclips_times[1] if len(eclips_times) > 1 else 0
+        #     # reduce_time = 0
+        #     total_time = attn_time + reduce_time
+        #     total_kv_size = k_cache_paged.numel() * k_cache_paged.element_size() * 2
+        #     if i >= num_warm:
+        #         # print(
+        #         #     f"Iter {i - num_warm + 1}, "
+        #         #     f"Time: {total_time:.2f} us, "
+        #         #     f"Attn: {attn_time:.2f} us, "
+        #         #     f"Reduce: {reduce_time:.2f} us, "
+        #         #     f"Total KV size: {total_kv_size / (1024 * 1024):.2f} MB, "
+        #         #     f"Bandwidth: {total_kv_size / total_time / (1000):.2f} GB/s"
+        #         # )
+        #         total_eclips_times.append(total_time)
 
-        total_kv_size = k_cache_paged.numel() * k_cache_paged.element_size() * 2
-        avg_time = sum(total_eclips_times) / len(total_eclips_times)
-        print(f"...split: Avg time: {avg_time:.2f} us, Avg bandwidth: {total_kv_size / avg_time / (1000):.2f} GB/s")
+        # total_kv_size = k_cache_paged.numel() * k_cache_paged.element_size() * 2
+        # avg_time = sum(total_eclips_times) / len(total_eclips_times)
+        # print(f"...split: Avg time: {avg_time:.2f} us, Avg bandwidth: {total_kv_size / avg_time / (1000):.2f} GB/s")
     out_ref = out_ref.squeeze(1)
     out_pt = out_pt.squeeze(1)
     out_attn = out_attn.squeeze(2)
@@ -596,12 +598,12 @@ def test_flash_attn_kvcache(
 
 if __name__ == "__main__":
     test_flash_attn_kvcache(
-        batch_size = 32,
+        batch_size = 8,
         nheads = 16,
         nheads_k = 2,
         seqlen_q = 1,
         seqlen_k = 1024,
-        d = 128,
+        d = 64,
         has_batch_idx = False,
         has_leftpad = False,
         paged_kv_block_size = 64,

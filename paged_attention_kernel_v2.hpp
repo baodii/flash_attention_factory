@@ -1218,6 +1218,7 @@ private:
   static constexpr uint32_t max_blocks_per_sg = policy::max_blocks_per_sg;
   static constexpr uint32_t query_group_size = policy::query_group_size;
   static constexpr uint32_t num_loop = policy::num_loop;
+  static constexpr uint32_t rows_per_sg = DIVIDE_ROUND_UP(query_group_size, wg_size);
 
   // used for preload query and store output
   // use minimum 16 to avoid mask in load
@@ -1459,10 +1460,10 @@ private:
   // -------------------- // softmax // -------------------- //
 
   // Compute softmax of score.
-  inline void softmax(arguments_t &args, accum_t &max_logits_old,
-                      accum_t &exp_sums_old,
+  inline void softmax(arguments_t &args, accum_t (&max_logits_old)[rows_per_sg],
+                      accum_t (&exp_sums_old)[rows_per_sg],
                       const int partition_idx /*for debug*/) {
-    if (ctx.sg_id < query_group_size) {
+    for (int row_id = ctx.sg_id, row_sg = 0; row_id < query_group_size; row_id += wg_size, row_sg++) {
       using softmax_score_tile_desc_t =
           subgroup::tile_desc_t<partition_size, 1, mma_sg_tile_size, 1>;
       using softmax_score_tile_t =
@@ -1481,7 +1482,7 @@ private:
           mem_desc_t<scalar_t, mem_layout::row_major, mem_space::global>,
           softmax_score_tile_desc_t, msg_type::block_1d, arch_tag>;
 
-      uint32_t start_y = ctx.sg_id;
+      uint32_t start_y = row_id;
       constexpr uint32_t boundary_y = query_group_size;
       sm_local_ld_payload_t sm_local_ld_payload(slm_offset_score,
                                                 partition_size, boundary_y,
@@ -1493,7 +1494,7 @@ private:
               sm_mat_score);
 
       accum_t scalar_max = max_score[0];
-      accum_t max_logits_cur = std::max(max_logits_old, scalar_max);
+      accum_t max_logits_cur = std::max(max_logits_old[row_sg], scalar_max);
       sm_mat_score.reg -= max_logits_cur;
       sm_mat_score.reg = xetla_exp<accum_t>(sm_mat_score.reg);
 
@@ -1514,10 +1515,10 @@ private:
       subgroup::tile_store(sm_mat_exp_score, sm_local_st_payload);
       
       // update max and sum
-      accum_t rescale_factor = std::exp(max_logits_old - max_logits_cur);
-      accum_t exp_sums_cur = rescale_factor * exp_sums_old + scalar_sum;
-      max_logits_old = max_logits_cur;
-      exp_sums_old = exp_sums_cur;
+      accum_t rescale_factor = std::exp(max_logits_old[row_sg] - max_logits_cur);
+      accum_t exp_sums_cur = rescale_factor * exp_sums_old[row_sg] + scalar_sum;
+      max_logits_old[row_sg] = max_logits_cur;
+      exp_sums_old[row_sg] = exp_sums_cur;
 
       // store rescale_factor and exp_sum into shared local memory for
       // compute_out
@@ -1530,14 +1531,14 @@ private:
 
       rescale_expsum_tile_t mat_rescale(rescale_factor);
       rescale_expsum_payload_t rescale_factor_payload(
-          slm_offset_rescale_factors, 1, query_group_size, 1, 0, ctx.sg_id);
+          slm_offset_rescale_factors, 1, query_group_size, 1, 0, row_id);
       subgroup::tile_store(mat_rescale, rescale_factor_payload);
 
-      rescale_expsum_tile_t mat_exp_sum(exp_sums_old);
+      rescale_expsum_tile_t mat_exp_sum(exp_sums_old[row_sg]);
       rescale_expsum_payload_t exp_sum_payload(
-          slm_offset_exp_sum, 1, query_group_size, 1, 0, ctx.sg_id);
+          slm_offset_exp_sum, 1, query_group_size, 1, 0, row_id);
       subgroup::tile_store(mat_exp_sum, exp_sum_payload);
-    } // end if sg_id < query_group_size
+    } // end of for each row in query_group_size
 
     xetla_fence<memory_kind::shared_local>();
     if constexpr (wg_size > 1)
@@ -1724,8 +1725,14 @@ public:
     xetla_nbarrier_init<get_barrier_count()>();
 
     // global max and sum
-    accum_t max_logits_old = neg_infinity;
-    accum_t exp_sums_old = 0.0f;
+    accum_t max_logits_old[rows_per_sg];
+    accum_t exp_sums_old[rows_per_sg];
+#pragma unroll
+    for (int i = 0; i < rows_per_sg; i++) {
+      max_logits_old[i] = neg_infinity;
+      exp_sums_old[i] = 0.0f;
+    }
+    
     out_acc_tile_t mat_out_acc(0.0f);
 
     for (int p_id = 0; p_id < num_loop; p_id++) {
