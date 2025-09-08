@@ -442,7 +442,7 @@ def test_flash_attn_kvcache(
     sm_scale = 1. / math.sqrt(d)
     softcat = -1.0
 
-    eclips_times = paged_attention.run(
+    eclips_times = paged_attention.run_loop(
         max_logits,
         exp_sums,
         tem_output,
@@ -501,8 +501,9 @@ def test_flash_attn_kvcache(
 
         total_kv_size = k_cache_paged.numel() * k_cache_paged.element_size() * 2
         avg_time = sum(total_eclips_times) / len(total_eclips_times)
-        print(f"...loop: batch_size {batch_size}, seqlen_k {seqlen_k}, d {d}, nheads {nheads}, nheads_k {nheads_k} Avg time: {avg_time:.2f} us, Avg bandwidth: {total_kv_size / avg_time / (1000):.2f} GB/s")
+        print(f"...loop:  batch_size {batch_size}, seqlen_k {seqlen_k}, d {d}, nheads {nheads}, nheads_k {nheads_k} Avg time: {avg_time:.2f} us, Total kv size: {total_kv_size / (1024*1024):.2f} MB, Avg bandwidth: {total_kv_size / avg_time / (1000):.2f} GB/s")
 
+        total_eclips_times.clear()
         for i in range(num_iters + num_warm):
             cur_idx = int(i % num_kv)
             eclips_times = paged_attention.run(
@@ -533,7 +534,7 @@ def test_flash_attn_kvcache(
 
         total_kv_size = k_cache_paged.numel() * k_cache_paged.element_size() * 2
         avg_time = sum(total_eclips_times) / len(total_eclips_times)
-        print(f"...split: batch_size {batch_size}, seqlen_k {seqlen_k}, d {d}, nheads {nheads}, nheads_k {nheads_k} Avg time: {avg_time:.2f} us, Avg bandwidth: {total_kv_size / avg_time / (1000):.2f} GB/s")
+        print(f"...split:  batch_size {batch_size}, seqlen_k {seqlen_k}, d {d}, nheads {nheads}, nheads_k {nheads_k} Avg time: {avg_time:.2f} us, Total kv size: {total_kv_size / (1024*1024):.2f} MB, Avg bandwidth: {total_kv_size / avg_time / (1000):.2f} GB/s")
     out_ref = out_ref.squeeze(1)
     out_pt = out_pt.squeeze(1)
     out_attn = out_attn.squeeze(2)
@@ -582,11 +583,11 @@ def test_flash_attn_kvcache(
 
 if __name__ == "__main__":
     test_flash_attn_kvcache(
-        batch_size = 16,
+        batch_size = 32,
         nheads = 16,
         nheads_k = 2,
         seqlen_q = 1,
-        seqlen_k = 1024,
+        seqlen_k = 2048,
         d = 64,
         has_batch_idx = False,
         has_leftpad = False,

@@ -157,6 +157,27 @@ inline auto switch_partition_paged_attn_loop(
         alibi_slopes, debug_out, block_tables, context_lens, max_num_partitions,
         sm_scale, num_seqs, num_heads, num_kv_heads, max_blocks_per_seq,
         softcap);
+  case 6:
+    return launch_paged_attn_loop<head_size, block_size, query_group_size, 6, T,
+                                  U, arch_tag>(
+        max_logits, exp_sums, out, tem_out, query, key_cache, value_cache,
+        alibi_slopes, debug_out, block_tables, context_lens, max_num_partitions,
+        sm_scale, num_seqs, num_heads, num_kv_heads, max_blocks_per_seq,
+        softcap);
+  case 7:
+    return launch_paged_attn_loop<head_size, block_size, query_group_size, 7, T,
+                                  U, arch_tag>(
+        max_logits, exp_sums, out, tem_out, query, key_cache, value_cache,
+        alibi_slopes, debug_out, block_tables, context_lens, max_num_partitions,
+        sm_scale, num_seqs, num_heads, num_kv_heads, max_blocks_per_seq,
+        softcap);
+  case 8:
+    return launch_paged_attn_loop<head_size, block_size, query_group_size, 8, T,
+                                  U, arch_tag>(
+        max_logits, exp_sums, out, tem_out, query, key_cache, value_cache,
+        alibi_slopes, debug_out, block_tables, context_lens, max_num_partitions,
+        sm_scale, num_seqs, num_heads, num_kv_heads, max_blocks_per_seq,
+        softcap);
   default:
     throw std::runtime_error("Unsupported number of partitions");
   }
