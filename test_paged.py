@@ -40,6 +40,7 @@ def attention_ref(
     q,
     k,
     v,
+    s,
     query_padding_mask=None,
     key_padding_mask=None,
     attn_bias=None,
@@ -57,6 +58,7 @@ def attention_ref(
         q: (batch_size, seqlen_q, nheads, head_dim)
         k: (batch_size, seqlen_k, nheads_k, head_dim)
         v: (batch_size, seqlen_k, nheads_k, head_dim)
+        s: (nheads)
         query_padding_mask: (batch_size, seqlen_q)
         key_padding_mask: (batch_size, seqlen_k)
         attn_bias: broadcastable to (batch_size, nheads, seqlen_q, seqlen_k)
@@ -106,10 +108,18 @@ def attention_ref(
     if attn_bias is not None:
         scores = scores + attn_bias
     # attention = torch.softmax(scores, dim=-1).to(v.dtype)
-    scores_max = torch.max(scores, dim=-1, keepdim=True)
-    scores_exp = torch.exp(scores - scores_max.values)
-    scores_exp_sum = torch.sum(scores_exp, dim=-1, keepdim=True)
-    attention = (scores_exp / scores_exp_sum).to(v.dtype)
+    scores_fp32 = scores.to(torch.float32)
+    scores_max = torch.max(scores_fp32, dim=-1, keepdim=True)
+    if s is not None:
+        learnable_sinks = rearrange(s, "h -> 1 h 1 1")
+        logits_or_sinks_max = torch.maximum(learnable_sinks, scores_max.values)
+        unnormalized_scores = torch.exp(scores_fp32 - logits_or_sinks_max)
+        scores_exp_sum = unnormalized_scores.sum(dim=-1, keepdim=True) + torch.exp(learnable_sinks - logits_or_sinks_max)
+        attention = (unnormalized_scores / scores_exp_sum).to(v.dtype)
+    else:
+        scores_exp = torch.exp(scores_fp32 - scores_max.values)
+        scores_exp_sum = torch.sum(scores_exp, dim=-1, keepdim=True)
+        attention = (scores_exp / scores_exp_sum).to(v.dtype)
     # for debugging
     partition_size = 512
     num_partitions = int((seqlen_k + partition_size - 1) / partition_size)
@@ -117,25 +127,25 @@ def attention_ref(
     old_sum = torch.zeros_like(scores_exp_sum)
     old_output = torch.zeros_like(q).to(dtype=torch.float32)
     out_partitions = torch.zeros((q.shape[0], q.shape[1], q.shape[2], num_partitions * q.shape[3]), dtype=torch.float32, device=q.device)
-    for i in range(num_partitions):
-        scores_part = scores[:, :, :, i * partition_size : (i + 1) * partition_size]
-        scores_max_part = torch.max(scores_part, dim=-1, keepdim=True).values
-        cur_max = torch.max(old_max, scores_max_part)
-        attn_part = torch.exp(scores_part - cur_max)
-        rescale_factors = torch.exp(old_max - cur_max)
-        cur_sum = rescale_factors * old_sum + torch.sum(attn_part, dim=-1, keepdim=True)
-        old_max = cur_max
-        old_sum = cur_sum
-        # print(f"rescale_factors: {rescale_factors} \n cur_sum: {cur_sum}")
-        out_par = torch.einsum("bhts,bshd->bthd", (attn_part), v[:, i * partition_size : (i + 1) * partition_size])
-        debug_rescale = torch.ones_like(rescale_factors)
-        out_par += old_output * rescale_factors.permute(0, 2, 1, 3)
-        head_size = q.shape[-1]
-        out_partitions[:, :, :, i * head_size : (i + 1) * head_size] = old_output * rescale_factors.permute(0, 2, 1, 3) # for debugging
-        old_output = out_par
+    # for i in range(num_partitions):
+    #     scores_part = scores[:, :, :, i * partition_size : (i + 1) * partition_size]
+    #     scores_max_part = torch.max(scores_part, dim=-1, keepdim=True).values
+    #     cur_max = torch.max(old_max, scores_max_part)
+    #     attn_part = torch.exp(scores_part - cur_max)
+    #     rescale_factors = torch.exp(old_max - cur_max)
+    #     cur_sum = rescale_factors * old_sum + torch.sum(attn_part, dim=-1, keepdim=True)
+    #     old_max = cur_max
+    #     old_sum = cur_sum
+    #     # print(f"rescale_factors: {rescale_factors} \n cur_sum: {cur_sum}")
+    #     out_par = torch.einsum("bhts,bshd->bthd", (attn_part.to(v.dtype)), v[:, i * partition_size : (i + 1) * partition_size])
+    #     debug_rescale = torch.ones_like(rescale_factors)
+    #     out_par += old_output * rescale_factors.permute(0, 2, 1, 3)
+    #     head_size = q.shape[-1]
+    #     out_partitions[:, :, :, i * head_size : (i + 1) * head_size] = old_output * rescale_factors.permute(0, 2, 1, 3) # for debugging
+    #     old_output = out_par
 
     # output_p = old_output / old_sum.permute(0, 2, 1, 3)
-    output_p = old_output
+    # output_p = old_output
 
     # Some rows might be completely masked out so we fill them with zero instead of NaN
     if window_size[0] >= 0 or window_size[1] >= 0:
@@ -206,6 +216,7 @@ def generate_random_padding_mask(max_seqlen, batch_size, device, mode="random"):
 @pytest.mark.parametrize("local", [False])
 @pytest.mark.parametrize("causal", [False])
 @pytest.mark.parametrize("seqlen_new_eq_seqlen_q", [True])
+@pytest.mark.parametrize("has_learnable_sinks", [True, False])
 @pytest.mark.parametrize("rotary_interleaved", [False])
 @pytest.mark.parametrize("rotary_fraction", [0.0])
 @pytest.mark.parametrize("paged_kv_block_size", [64])
@@ -259,6 +270,7 @@ def test_flash_attn_kvcache(
     local,
     alibi,
     new_kv,
+    has_learnable_sinks,
     mha_type,
     num_splits,
     dtype,
@@ -397,10 +409,15 @@ def test_flash_attn_kvcache(
 
     wg_size = int(d / 16)
     partition_size = int(wg_size * paged_kv_block_size)
+    if has_learnable_sinks:
+        learnable_sinks = torch.ones(nheads, dtype=dtype, device=device) * 10
+    else:
+        learnable_sinks = None
     out_ref, out_attn, out_partitions = attention_ref(
         q_ro,
         k_cache_rep,
         v_cache_rep,
+        learnable_sinks,
         None,
         key_padding_mask if varlen else None,
         attn_bias,
@@ -414,6 +431,7 @@ def test_flash_attn_kvcache(
         q_ro,
         k_cache_rep,
         v_cache_rep,
+        learnable_sinks,
         None,
         key_padding_mask if varlen else None,
         attn_bias,
@@ -429,10 +447,10 @@ def test_flash_attn_kvcache(
     num_partitions = int((seqlen_k + partition_size - 1) / partition_size)
     max_logits = torch.empty((batch_size, nheads, num_partitions), dtype=torch.float32, device=device)
     exp_sums = torch.empty_like(max_logits)
-    out = torch.zeros((batch_size, nheads, d), dtype=torch.float16, device=device)
-    tem_output = torch.zeros((batch_size, nheads, num_partitions, d), dtype=torch.float16, device=device)
+    out = torch.zeros((batch_size, nheads, d), dtype=dtype, device=device)
+    tem_output = torch.zeros((batch_size, nheads, num_partitions, d), dtype=dtype, device=device)
     debug_output = torch.zeros((batch_size, nheads, num_partitions * d), dtype=torch.float32, device=device)
-    query = q.view(batch_size * seqlen_q, nheads, d).contiguous().to(device=device, dtype=torch.float16)
+    query = q.view(batch_size * seqlen_q, nheads, d).contiguous().to(device=device, dtype=dtype)
     alibi_slopes = torch.ones((nheads), dtype=torch.float32, device=device)
     context_lens = torch.tensor([seqlen_k] * batch_size, dtype=torch.int32, device=device)
     context_lens = seq_lens.squeeze(1).to(torch.int32).to(device) if varlen else context_lens
@@ -458,6 +476,7 @@ def test_flash_attn_kvcache(
         paged_kv_block_size,
         seqlen_k,
         alibi_slopes,
+        learnable_sinks,
         softcat
     )
 
@@ -489,6 +508,7 @@ def test_flash_attn_kvcache(
                 paged_kv_block_size,
                 seqlen_k,
                 alibi_slopes,
+                learnable_sinks,
                 softcat
             )
             attn_time = eclips_times[0]
@@ -522,6 +542,7 @@ def test_flash_attn_kvcache(
                 paged_kv_block_size,
                 seqlen_k,
                 alibi_slopes,
+                learnable_sinks,
                 softcat
             )
             attn_time = eclips_times[0]
@@ -583,12 +604,12 @@ def test_flash_attn_kvcache(
 
 if __name__ == "__main__":
     test_flash_attn_kvcache(
-        batch_size = 64,
-        nheads = 10,
-        nheads_k = 2,
+        batch_size = 8,
+        nheads = 1,
+        nheads_k = 1,
         seqlen_q = 1,
-        seqlen_k = 1024,
-        d = 128,
+        seqlen_k = 512,
+        d = 64,
         has_batch_idx = False,
         has_leftpad = False,
         paged_kv_block_size = 64,
@@ -599,9 +620,10 @@ if __name__ == "__main__":
         local = False,
         alibi = False,
         new_kv = False,
+        has_learnable_sinks = True,
         mha_type = "gqa",
         num_splits = 1,
         dtype = torch.float16,
         varlen=False,
-        do_performance=True,
+        do_performance=False,
     )

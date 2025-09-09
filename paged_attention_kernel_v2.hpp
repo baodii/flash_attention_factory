@@ -264,6 +264,7 @@ public:
     scalar_t *query;     // [num_seqs, num_heads, head_size]
     scalar_t *key_cache; // [num_blocks, block_size, num_kv_heads, head_size]
     scalar_t *value_cache; // [num_blocks, block_size, num_kv_heads, head_size]
+    scalar_t *sinks;       // [num_heads]
     float *alibi_slopes;   // [num_heads] - alibi_slopes
 
     // temporary output
@@ -286,14 +287,15 @@ public:
 
     inline arguments_t(accum_t *max_logits, accum_t *exp_sums, scalar_t *out,
                        scalar_t *tem_out, scalar_t *query, scalar_t *key_cache,
-                       scalar_t *value_cache, float *alibi_slopes,
-                       index_t *block_tables, index_t *context_lens,
-                       accum_t sm_scale, uint32_t num_seqs, uint32_t num_heads,
+                       scalar_t *value_cache, scalar_t *sinks,
+                       float *alibi_slopes, index_t *block_tables,
+                       index_t *context_lens, accum_t sm_scale,
+                       uint32_t num_seqs, uint32_t num_heads,
                        uint32_t num_kv_heads, uint32_t head_size,
                        uint32_t max_blocks_per_seq, accum_t softcap)
         : max_logits(max_logits), exp_sums(exp_sums), out(out),
           tem_out(tem_out), query(query), key_cache(key_cache),
-          value_cache(value_cache), alibi_slopes(alibi_slopes),
+          value_cache(value_cache), sinks(sinks), alibi_slopes(alibi_slopes),
           block_tables(block_tables), context_lens(context_lens),
           sm_scale(sm_scale), num_seqs(num_seqs), num_heads(num_heads),
           num_kv_heads(num_kv_heads), head_size(head_size),
@@ -364,6 +366,7 @@ private:
     int end_block_id;
 
     float alibi_slopes;
+    accum_t sinks_array[query_group_size];
 
     xetla_nbarrier_t<wg_size, wg_size, arch_tag> nbarrier;
 
@@ -380,6 +383,19 @@ private:
       // if (args.alibi_slopes != nullptr) {
       //   alibi_slopes = args.alibi_slopes[head_id];
       // }
+
+      if (args.sinks != nullptr) {
+#pragma unroll
+        for (uint32_t i = 0; i < query_group_size; i++) {
+          sinks_array[i] = static_cast<accum_t>(
+              args.sinks[kv_head_id * query_group_size + i]);
+        }
+      } else {
+#pragma unroll
+        for (uint32_t i = 0; i < query_group_size; i++) {
+          sinks_array[i] = neg_infinity;
+        }
+      }
 
       context_len = args.context_lens[seq_id];
       block_table = args.block_tables + seq_id * args.max_blocks_per_seq;
@@ -567,14 +583,19 @@ private:
           subgroup::tile_reduce<reduce_op::max, accum_t, accum_t, 1>(
               sm_mat_score);
 
+      accum_t sink =
+          ctx.partition_id == 0 ? ctx.sinks_array[row_id] : neg_infinity;
       accum_t scalar_max = max_score[0];
+      scalar_max = std::max(scalar_max, sink);
       sm_mat_score.reg -= scalar_max;
       sm_mat_score.reg = xetla_exp<accum_t>(sm_mat_score.reg);
+      sink = std::exp(sink - scalar_max);
 
       xetla_vector<accum_t, 1> sum_score =
           subgroup::tile_reduce<reduce_op::sum, accum_t, accum_t, 1>(
               sm_mat_score);
       accum_t scalar_sum = sum_score[0];
+      scalar_sum += sink;
       sm_mat_score.reg /= scalar_sum;
 
       // Store the softmax result back to shared local memory
@@ -621,7 +642,7 @@ private:
       global_scalar_st_payload_t max_logits_st_payload(
           cur_max_logits, boundary_g_x, boundary_g_y, ctx.max_num_partitions,
           start_g_x, start_g_y);
-      scalar_tile_t max_logit_scalar(max_score[0]);
+      scalar_tile_t max_logit_scalar(scalar_max);
       subgroup::tile_store(max_logit_scalar, max_logits_st_payload);
 
       auto *cur_exp_sums =
@@ -630,7 +651,7 @@ private:
       global_scalar_st_payload_t exp_sums_st_payload(
           cur_exp_sums, boundary_g_x, boundary_g_y, ctx.max_num_partitions,
           start_g_x, start_g_y);
-      scalar_tile_t exp_sum_scalar(sum_score[0]);
+      scalar_tile_t exp_sum_scalar(scalar_sum);
       subgroup::tile_store(exp_sum_scalar, exp_sums_st_payload);
     }
     xetla_fence<memory_kind::shared_local>();
@@ -1173,6 +1194,7 @@ public:
     scalar_t *query;       // [num_seqs, num_heads, head_size]
     scalar_t *key_cache;   // [num_blocks, block_size, num_kv_heads, head_size]
     scalar_t *value_cache; // [num_blocks, block_size, num_kv_heads, head_size]
+    scalar_t *sinks;       // [num_heads]
     float *alibi_slopes;   // [num_heads] - alibi_slopes
 
     // temporary output
@@ -1195,13 +1217,13 @@ public:
 
     inline arguments_t(scalar_t *out, accum_t *tem_out, scalar_t *query,
                        scalar_t *key_cache, scalar_t *value_cache,
-                       float *alibi_slopes, index_t *block_tables,
-                       index_t *context_lens, accum_t sm_scale,
-                       uint32_t num_seqs, uint32_t num_heads,
+                       scalar_t *sinks, float *alibi_slopes,
+                       index_t *block_tables, index_t *context_lens,
+                       accum_t sm_scale, uint32_t num_seqs, uint32_t num_heads,
                        uint32_t num_kv_heads, uint32_t head_size,
                        uint32_t max_blocks_per_seq, accum_t softcap)
         : out(out), tem_out(tem_out), query(query), key_cache(key_cache),
-          value_cache(value_cache), alibi_slopes(alibi_slopes),
+          value_cache(value_cache), sinks(sinks), alibi_slopes(alibi_slopes),
           block_tables(block_tables), context_lens(context_lens),
           sm_scale(sm_scale), num_seqs(num_seqs), num_heads(num_heads),
           num_kv_heads(num_kv_heads), head_size(head_size),
@@ -1284,6 +1306,7 @@ private:
     uint32_t num_blocks_per_wg;
 
     float alibi_slopes;
+    accum_t sinks_array[query_group_size];
 
     xetla_nbarrier_t<wg_size, wg_size, arch_tag> nbarrier;
 
@@ -1298,6 +1321,18 @@ private:
       // if (args.alibi_slopes != nullptr) {
       //   alibi_slopes = args.alibi_slopes[head_id];
       // }
+      if (args.sinks != nullptr) {
+#pragma unroll
+        for (uint32_t i = 0; i < query_group_size; i++) {
+          sinks_array[i] = static_cast<accum_t>(
+              args.sinks[kv_head_id * query_group_size + i]);
+        }
+      } else {
+#pragma unroll
+        for (uint32_t i = 0; i < query_group_size; i++) {
+          sinks_array[i] = neg_infinity;
+        }
+      }
 
       block_table = args.block_tables + seq_id * args.max_blocks_per_seq;
       num_blocks_per_sg = 0;
@@ -1462,7 +1497,7 @@ private:
   // Compute softmax of score.
   inline void softmax(arguments_t &args, accum_t (&max_logits_old)[rows_per_sg],
                       accum_t (&exp_sums_old)[rows_per_sg],
-                      const int partition_idx /*for debug*/) {
+                      const int partition_idx) {
     for (int row_id = ctx.sg_id, row_sg = 0; row_id < query_group_size;
          row_id += wg_size, row_sg++) {
       using softmax_score_tile_desc_t =
@@ -1494,15 +1529,21 @@ private:
           subgroup::tile_reduce<reduce_op::max, accum_t, accum_t, 1>(
               sm_mat_score);
 
+      accum_t sink =
+          partition_idx == 0 ? ctx.sinks_array[row_id] : neg_infinity;
+
       accum_t scalar_max = max_score[0];
+      scalar_max = std::max(scalar_max, sink);
       accum_t max_logits_cur = std::max(max_logits_old[row_sg], scalar_max);
       sm_mat_score.reg -= max_logits_cur;
       sm_mat_score.reg = xetla_exp<accum_t>(sm_mat_score.reg);
+      sink = std::exp(sink - max_logits_cur);
 
       xetla_vector<accum_t, 1> sum_score =
           subgroup::tile_reduce<reduce_op::sum, accum_t, accum_t, 1>(
               sm_mat_score);
       accum_t scalar_sum = sum_score[0];
+      scalar_sum += sink;
 
       // Store the softmax result back to shared local memory
       using softmax_exp_score_tile_t =

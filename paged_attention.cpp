@@ -1,5 +1,6 @@
 #include <iostream>
 #include <stdexcept>
+#include <optional>
 #include <sycl/sycl.hpp>
 #include <torch/torch.h>
 #include <torch/extension.h>
@@ -36,6 +37,7 @@ std::vector<float> paged_attention(
     const int64_t block_size,
     const int64_t max_context_len,
     const torch::Tensor& alibi_slopes,
+    std::optional<torch::Tensor> &sinks,
     const double softcap) {
   
   using T = fp16;
@@ -53,6 +55,10 @@ std::vector<float> paged_attention(
   auto *alibi_slopes_ptr = alibi_slopes.data_ptr<float>();
   auto *block_tables_ptr = block_tables.data_ptr();
   auto *context_lens_ptr = context_lens.data_ptr();
+  void *sinks_ptr = nullptr;
+  if (sinks.has_value()) {
+    sinks_ptr = sinks.value().data_ptr();
+  }
 
   uint32_t num_seqs = query.size(0);
   uint32_t num_heads = query.size(1);
@@ -66,7 +72,9 @@ std::vector<float> paged_attention(
       reinterpret_cast<T *>(output_ptr),
       reinterpret_cast<T *>(tem_output_ptr), reinterpret_cast<T *>(query_ptr),
       reinterpret_cast<T *>(key_cache_ptr),
-      reinterpret_cast<T *>(value_cache_ptr), alibi_slopes_ptr,
+      reinterpret_cast<T *>(value_cache_ptr), 
+      alibi_slopes_ptr,
+      reinterpret_cast<T *>(sinks_ptr),
       reinterpret_cast<T *>(debug_output_ptr),
       reinterpret_cast<U *>(block_tables_ptr),
       reinterpret_cast<U *>(context_lens_ptr), max_num_partitions,
@@ -90,6 +98,7 @@ std::vector<float> paged_attention_loop(
     const int64_t block_size,
     const int64_t max_context_len,
     const torch::Tensor& alibi_slopes,
+    std::optional<torch::Tensor> &sinks,
     const double softcap) {
   
   using T = fp16;
@@ -107,6 +116,10 @@ std::vector<float> paged_attention_loop(
   auto *alibi_slopes_ptr = alibi_slopes.data_ptr<float>();
   auto *block_tables_ptr = block_tables.data_ptr();
   auto *context_lens_ptr = context_lens.data_ptr();
+  void *sinks_ptr = nullptr;
+  if (sinks.has_value()) {
+    sinks_ptr = sinks.value().data_ptr();
+  }
 
   uint32_t num_seqs = query.size(0);
   uint32_t num_heads = query.size(1);
@@ -120,7 +133,9 @@ std::vector<float> paged_attention_loop(
       reinterpret_cast<T *>(output_ptr),
       reinterpret_cast<T *>(tem_output_ptr), reinterpret_cast<T *>(query_ptr),
       reinterpret_cast<T *>(key_cache_ptr),
-      reinterpret_cast<T *>(value_cache_ptr), alibi_slopes_ptr,
+      reinterpret_cast<T *>(value_cache_ptr), 
+      alibi_slopes_ptr,
+      reinterpret_cast<T *>(sinks_ptr),
       reinterpret_cast<float *>(debug_output_ptr),
       reinterpret_cast<U *>(block_tables_ptr),
       reinterpret_cast<U *>(context_lens_ptr), max_num_partitions,
