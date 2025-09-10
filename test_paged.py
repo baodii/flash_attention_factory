@@ -409,6 +409,7 @@ def test_flash_attn_kvcache(
 
     wg_size = int(d / 16)
     partition_size = int(wg_size * paged_kv_block_size)
+    # partition_size = 512
     if has_learnable_sinks:
         learnable_sinks = torch.ones(nheads, dtype=dtype, device=device) * 10
     else:
@@ -561,8 +562,8 @@ def test_flash_attn_kvcache(
     out_attn = out_attn.squeeze(2)
     out_attn_2 = out_attn_2.squeeze(2)
     out_partitions = out_partitions.squeeze(1)
-    print(f"out_ref: {out_ref[0, 0, :10]}")
-    print(f"out: {out[0, 0, :10]}")
+    # print(f"out_ref: {out_ref[0, 0, :10]}")
+    # print(f"out: {out[0, 0, :10]}")
     print(f"eclips times: {eclips_times}")
     # assert_close_verbose(out_attn_2, debug_output, rtol=1e-3, atol=1e-3)
     # assert_close_verbose(out, out_ref, rtol=1e-3, atol=1e-3)
@@ -604,11 +605,11 @@ def test_flash_attn_kvcache(
 
 if __name__ == "__main__":
     test_flash_attn_kvcache(
-        batch_size = 8,
-        nheads = 1,
-        nheads_k = 1,
+        batch_size = 64,
+        nheads = 64,
+        nheads_k = 8,
         seqlen_q = 1,
-        seqlen_k = 512,
+        seqlen_k = 1500,
         d = 64,
         has_batch_idx = False,
         has_leftpad = False,
@@ -625,5 +626,5 @@ if __name__ == "__main__":
         num_splits = 1,
         dtype = torch.float16,
         varlen=False,
-        do_performance=False,
+        do_performance=True,
     )

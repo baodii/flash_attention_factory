@@ -374,8 +374,8 @@ private:
 
     inline void init(sycl::nd_item<3> &item, arguments_t &args) {
       sg_id = item.get_local_linear_id();
-      kv_head_id = item.get_group(0);
-      seq_id = item.get_group(1);
+      kv_head_id = item.get_group(1);
+      seq_id = item.get_group(0);
       partition_id = item.get_group(2);
       max_num_partitions = item.get_group_range(2);
 
@@ -777,7 +777,7 @@ public:
                                                uint32_t max_num_partitions) {
     static const sycl::range<3> local_range = sycl::range<3>{1, 1, wg_size};
     sycl::range<3> group_range =
-        sycl::range<3>{num_kv_heads, num_seqs, max_num_partitions};
+        sycl::range<3>{num_seqs, num_kv_heads, max_num_partitions};
     return sycl::nd_range<3>{group_range * local_range, local_range};
   };
 
@@ -1314,8 +1314,8 @@ private:
 
     inline void init(sycl::nd_item<3> &item, arguments_t &args) {
       sg_id = item.get_local_linear_id();
-      kv_head_id = item.get_group(0);
-      seq_id = item.get_group(1);
+      kv_head_id = item.get_group(1);
+      seq_id = item.get_group(0);
 
       // head_id = kv_head_id * query_group_size;
       // if (args.alibi_slopes != nullptr) {
@@ -1747,7 +1747,7 @@ public:
   static inline sycl::nd_range<3> get_nd_range(uint32_t num_seqs,
                                                uint32_t num_kv_heads) {
     static const sycl::range<3> local_range = sycl::range<3>{1, 1, wg_size};
-    sycl::range<3> group_range = sycl::range<3>{num_kv_heads, num_seqs, 1};
+    sycl::range<3> group_range = sycl::range<3>{num_seqs, num_kv_heads, 1};
     return sycl::nd_range<3>{group_range * local_range, local_range};
   };
 
