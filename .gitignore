@@ -2,5 +2,5 @@ test_paged_attn
 cscope.out
 tags
 cscope
-paged_attention.so
+*.so
 __pycache__

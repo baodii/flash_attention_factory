@@ -1,5 +1,6 @@
 import torch
-import paged_attention
+import paged_attention_loop
+import paged_attention_reduce
 import pytest
 
 import math
@@ -461,7 +462,7 @@ def test_flash_attn_kvcache(
     sm_scale = 1. / math.sqrt(d)
     softcat = -1.0
 
-    eclips_times = paged_attention.run_loop(
+    eclips_times = paged_attention_loop.run(
         max_logits,
         exp_sums,
         tem_output,
@@ -493,7 +494,7 @@ def test_flash_attn_kvcache(
             v_caches.append(v_cache_paged.clone())
         for i in range(num_iters + num_warm):
             cur_idx = int(i % num_kv)
-            eclips_times = paged_attention.run_loop(
+            eclips_times = paged_attention_loop.run(
                 max_logits,
                 exp_sums,
                 tem_output,
@@ -527,7 +528,7 @@ def test_flash_attn_kvcache(
         total_eclips_times.clear()
         for i in range(num_iters + num_warm):
             cur_idx = int(i % num_kv)
-            eclips_times = paged_attention.run(
+            eclips_times = paged_attention_reduce.run(
                 max_logits,
                 exp_sums,
                 tem_output,

@@ -1,29 +1,75 @@
-CXX = icpx
-CXXFLAGS = -std=c++20 -O2 -fPIC -fsycl -fsycl-targets=spir64_gen
-# CXXFLAGS = -std=c++20 -O0 -g -fPIC -fsycl -fsycl-targets=spir64_gen
-AOTFLAGS = -Xsycl-target-backend=spir64_gen "-device bmg-g21-a0 -options '-doubleGRF -vc-codegen -Xfinalizer -printregusage'"
+# ============================================================
+# Makefile for Paged Attention Extensions
+# ============================================================
 
-BINDFLAGS = -DTORCH_EXTENSION_NAME=paged_attention
+# ------------------------------------------------------------
+# Compiler and Flags
+# ------------------------------------------------------------
+CXX       := icpx
+CXXSTD    := -std=c++20
+OPTFLAGS  := -O2 -fPIC
+SYCLFLAGS := -fsycl -fsycl-targets=spir64_gen
+CXXFLAGS  := $(CXXSTD) $(OPTFLAGS) $(SYCLFLAGS)
 
-TORCH_DIR = /home/baodi/workspace/pytorch/torch
-LIB_DIR := $(TORCH_DIR)/lib
+# Debug build (uncomment to enable)
+# CXXFLAGS := $(CXXSTD) -O0 -g -fPIC $(SYCLFLAGS)
 
-ESIMD_PATH = $(CMPLR_ROOT)/include/sycl
-PYTHON_PATH = $(shell python3 -c 'import sysconfig; print(sysconfig.get_paths()["include"])')
+# Ahead-Of-Time (AOT) Compilation Flags
+AOTFLAGS  := -Xsycl-target-backend=spir64_gen \
+             "-device bmg-g21-a0 -options '-doubleGRF -vc-codegen -Xfinalizer -printregusage'"
 
-CXXOPTS_PATH = $(CURDIR)/cxxopts
-INCLUDES = -I. -I$(CXXOPTS_PATH)/include -I$(TORCH_DIR)/include -I$(TORCH_DIR)/include/torch/csrc/api/include -I$(ESIMD_PATH) -I$(PYTHON_PATH)
-LIBS = -L$(LIB_DIR) -ltorch_python -ltorch -ltorch_xpu -ltorch_cpu -lc10 -lc10_xpu -Wl,-rpath,$(LIB_DIR)
+# ------------------------------------------------------------
+# Paths
+# ------------------------------------------------------------
+TORCH_DIR      := /home/baodi/workspace/pytorch/torch
+LIB_DIR        := $(TORCH_DIR)/lib
+ESIMD_PATH     := $(CMPLR_ROOT)/include/sycl
+PYTHON_PATH    := $(shell python3 -c 'import sysconfig; print(sysconfig.get_paths()["include"])')
+IPEX_XETLA_DIR := /home/baodi/ipex/csrc/gpu/aten/operators/xetla/kernels
 
-IPEX_XETLA_DIR = /home/baodi/ipex/csrc/gpu/aten/operators/xetla/kernels
-XETLA_INCLUDES = -I$(IPEX_XETLA_DIR)/include -I$(IPEX_XETLA_DIR)
+# ------------------------------------------------------------
+# Includes and Libraries
+# ------------------------------------------------------------
+INCLUDES := -I. \
+            -I$(CXXOPTS_PATH)/include \
+            -I$(TORCH_DIR)/include \
+            -I$(TORCH_DIR)/include/torch/csrc/api/include \
+            -I$(ESIMD_PATH) \
+            -I$(PYTHON_PATH) \
+            -I$(IPEX_XETLA_DIR)/include \
+            -I$(IPEX_XETLA_DIR)
 
-SRC = paged_attention.cpp 
-OUT = paged_attention.so
+LIBS := -L$(LIB_DIR) \
+        -ltorch_python -ltorch -ltorch_xpu -ltorch_cpu \
+        -lc10 -lc10_xpu \
+        -Wl,-rpath,$(LIB_DIR)
 
-all:
-	$(CXX) $(CXXFLAGS) $(AOTFLAGS) $(BINDFLAGS) $(SRC) $(INCLUDES) $(XETLA_INCLUDES) $(LIBS) -shared -o $(OUT)
+# ------------------------------------------------------------
+# Extension Definitions
+# ------------------------------------------------------------
+EXTENSIONS := paged_attention_reduce paged_attention_loop
+
+# Auto-derive file names
+SRCS := $(addsuffix .cpp,$(EXTENSIONS))
+OUTS := $(addsuffix .so,$(EXTENSIONS))
+
+# Auto-generate per-extension defines
+$(foreach ext,$(EXTENSIONS), \
+  $(eval $(ext)_DEFINES := -DTORCH_EXTENSION_NAME=$(ext)) \
+)
+
+# ------------------------------------------------------------
+# Targets
+# ------------------------------------------------------------
+.PHONY: all clean
+
+all: $(OUTS)
+
+%.so: %.cpp
+	$(CXX) $(CXXFLAGS) $(AOTFLAGS) $($(basename $@)_DEFINES) \
+	      $(INCLUDES) -shared $< -o $@ $(LIBS)
 
 clean:
-	rm -f $(OUT)
+	@echo "Cleaning build artifacts..."
+	@rm -f $(OUTS)
 
