@@ -21,7 +21,8 @@ AOTFLAGS  := -Xsycl-target-backend=spir64_gen \
 # ------------------------------------------------------------
 # Paths
 # ------------------------------------------------------------
-TORCH_DIR      := /home/baodi/workspace/pytorch/torch
+# TORCH_DIR      := /home/baodi/workspace/pytorch/torch
+TORCH_DIR 		 := $(shell python3 -c "import torch; import os; print(os.path.dirname(torch.__file__))")
 LIB_DIR        := $(TORCH_DIR)/lib
 ESIMD_PATH     := $(CMPLR_ROOT)/include/sycl
 PYTHON_PATH    := $(shell python3 -c 'import sysconfig; print(sysconfig.get_paths()["include"])')
