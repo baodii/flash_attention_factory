@@ -48,7 +48,7 @@ LIBS := -L$(LIB_DIR) \
 # ------------------------------------------------------------
 # Extension Definitions
 # ------------------------------------------------------------
-EXTENSIONS := paged_attention_reduce paged_attention_loop
+EXTENSIONS := paged_attention_reduce paged_attention_loop flash_attention
 
 # Auto-derive file names
 SRCS := $(addsuffix .cpp,$(EXTENSIONS))

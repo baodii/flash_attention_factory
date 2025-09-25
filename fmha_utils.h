@@ -1,9 +1,9 @@
 #pragma once
-#include "../xetla.h"
+#include "xetla.h"
 
 namespace gpu::xetla {
 
-namespace fmha {
+namespace attention {
 
 template <gpu_arch arch_tag>
 class fmha_perf_knob_t {
@@ -559,7 +559,7 @@ void load_tile(
   subgroup::tile_load(*dst, load_payload);
 }
 
-} // namespace fmha
+} // namespace attention 
 
 } // namespace gpu::xetla
 

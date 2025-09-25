@@ -1,4 +1,3 @@
-
 #pragma once
 /*
 Fused Multi-Head Attention Forward
@@ -12,7 +11,7 @@ This is an implementation of the Flash Attention algorithm
 #include "fmha_utils.h"
 
 namespace gpu::xetla {
-namespace fmha {
+namespace attention {
 
 template <
     typename fmha_policy,
@@ -980,13 +979,13 @@ class fmha_forward_t {
     matQi_load_t matQi_load(mem_desc_Qi_load);
     subgroup::tile_load(matQi, matQi_load);
 
-    subgroup::elemwise_cvt(matQi_acc, matQi);
-    accum_t scalar_value = matQi_acc.reg.xetla_select<1, 1>(0)[0];
-    sycl::ext::oneapi::experimental::printf(
-        "ctx.sg_idx %d, ctx.sg_idy %d, scalar_value %f\n",
-        ctx.sg_idx,
-        ctx.sg_idy,
-        scalar_value);
+    // subgroup::elemwise_cvt(matQi_acc, matQi);
+    // accum_t scalar_value = matQi_acc.reg.xetla_select<1, 1>(0)[0];
+    // sycl::ext::oneapi::experimental::printf(
+    //     "ctx.sg_idx %d, ctx.sg_idy %d, scalar_value %f\n",
+    //     ctx.sg_idx,
+    //     ctx.sg_idy,
+    //     scalar_value);
 
     matQi_store_t matQi_store(mem_desc_Qi_store);
     subgroup::tile_store(matQi, matQi_store);
@@ -1118,5 +1117,5 @@ class fmha_forward_t {
     store_for_backward(args);
   }
 }; // fmha_forward_t
-} // namespace fmha
+} // namespace attention
 } // namespace gpu::xetla
