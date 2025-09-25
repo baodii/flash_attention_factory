@@ -1,5 +1,5 @@
 test_paged_attn
-cscope.out
+cscope.out*
 tags
 cscope
 *.so
