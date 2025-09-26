@@ -45,6 +45,7 @@ class fmha_forward_t {
     uint8_t* Dp_ptr = nullptr; // [B, N, F, T] - dropout mask
     // Output tensor
     scalar_t* O_ptr; // raw: [B, F, N, H]; permute: [B, N, F, H] - output
+    accum_t* debug_ptr;
     accum_t* L_ptr; // logsum softmax: [B, N, F]
     // Dimension size
     uint32_t uB;
@@ -94,6 +95,7 @@ class fmha_forward_t {
         scalar_t* bias,
         uint8_t* dropout,
         scalar_t* out,
+        accum_t* debug_out,
         accum_t* logsumsoftmax,
         uint32_t num_batches,
         uint32_t num_heads,
@@ -132,6 +134,7 @@ class fmha_forward_t {
           B_ptr(bias),
           Dp_ptr(dropout),
           O_ptr(out),
+          debug_ptr(debug_out),
           L_ptr(logsumsoftmax),
           uB(num_batches),
           uN(num_heads),
@@ -979,13 +982,13 @@ class fmha_forward_t {
     matQi_load_t matQi_load(mem_desc_Qi_load);
     subgroup::tile_load(matQi, matQi_load);
 
-    // subgroup::elemwise_cvt(matQi_acc, matQi);
-    // accum_t scalar_value = matQi_acc.reg.xetla_select<1, 1>(0)[0];
-    // sycl::ext::oneapi::experimental::printf(
-    //     "ctx.sg_idx %d, ctx.sg_idy %d, scalar_value %f\n",
-    //     ctx.sg_idx,
-    //     ctx.sg_idy,
-    //     scalar_value);
+    /* subgroup::elemwise_cvt(matQi_acc, matQi); */
+    /* accum_t scalar_value = matQi_acc.reg.xetla_select<1, 1>(0)[0]; */
+    /* sycl::ext::oneapi::experimental::printf( */
+    /*     "ctx.sg_idx %d, ctx.sg_idy %d, scalar_value %f\n", */
+    /*     ctx.sg_idx, */
+    /*     ctx.sg_idy, */
+    /*     scalar_value); */
 
     matQi_store_t matQi_store(mem_desc_Qi_store);
     subgroup::tile_store(matQi, matQi_store);
@@ -1103,6 +1106,41 @@ class fmha_forward_t {
       // compute Sij
       matAccSij_t matAccSij(0);
       gemm_Sij(matAccSij, args);
+      // store debug mat
+      using debug_payload_t = subgroup::mem_payload_t<
+          mem_mask_desc_t<
+              accum_t,
+              mem_layout::row_major,
+              mem_space::global>,
+          typename matAccSij_t::tile_desc,
+          subgroup::msg_type_v<
+              typename matAccSij_t::tile_desc,
+              mem_mask_desc_t<
+                  accum_t,
+                  mem_layout::row_major,
+                  mem_space::global>>,
+          arch_tag>;
+      
+      accum_t* cur_debug_ptr = args.debug_ptr +
+          (ctx.batch_id * args.uN + ctx.head_id) * args.uF * args.uT;
+
+      uint32_t debug_start_x = startT + ctx.sg_idx * kSgBc;
+      uint32_t debug_start_y = startF + ctx.sg_idy * kSgBr;
+      uint32_t debug_pitch = args.uT;
+      uint32_t debug_boundary_x = args.uT;
+      uint32_t debug_boundary_y = args.uF;
+
+      debug_payload_t debug_payload(cur_debug_ptr, 
+                                    debug_boundary_x, 
+                                    debug_boundary_y, 
+                                    debug_pitch, 
+                                    debug_start_x, 
+                                    debug_start_y);
+
+      subgroup::tile_store(matAccSij, debug_payload);
+
+      // store debug mat end
+
       // apply mask
       apply_mask(matAccSij, args, startF + seqlen_diff, startT);
       // softmax

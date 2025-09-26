@@ -15,7 +15,8 @@ using namespace gpu::xetla::attention;
 
 template <typename T, gpu_arch arch_tag>
 inline auto dispatch_paged_attention_flash(
-    T *query_ptr, T *key_ptr, T *value_ptr, T *out_ptr, uint32_t num_batches,
+    T *query_ptr, T *key_ptr, T *value_ptr, T *out_ptr, float *debug_ptr,
+    uint32_t num_batches,
     uint32_t num_heads, uint32_t num_kv_heads, uint32_t head_size,
     uint32_t num_queries, uint32_t num_keys, uint32_t q_strideB,
     uint32_t q_strideN, uint32_t q_strideF, uint32_t kv_strideB,
@@ -41,6 +42,7 @@ inline auto dispatch_paged_attention_flash(
               nullptr, // attn_mask
               nullptr, // dropout_mask
               out_ptr,
+              debug_ptr,
               nullptr, // softmax_lse
               num_batches, 
               num_heads, 

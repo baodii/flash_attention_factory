@@ -1,6 +1,16 @@
 import flash_attention
 import torch
 import torch.nn.functional as F
+import math
+
+torch.set_printoptions(threshold=float('inf'))
+
+def attention_ref(query, key, value, scale):
+    d = query.size(-1)
+    scores = torch.einsum('bhqd,bhkd->bhqk', query.to(torch.float32) * scale, key.to(torch.float32))
+    attn_weights = torch.softmax(scores, dim=-1).to(value.dtype)
+    output = torch.einsum('bhqk,bhkd->bhqd', attn_weights, value)
+    return output, scores.to(torch.float32)
 
 query = torch.load("./query.pt", map_location=torch.device('xpu:0'))
 key = torch.load("./key.pt", map_location=torch.device('xpu:0'))
@@ -23,14 +33,18 @@ print(f"value shape: {value.shape}, stride: {value.stride()}")
 
 iter_num = 1
 
+output_ref, scores_ref = attention_ref(query, key, value, scale)
+
 for i in range(iter_num):
     output = F.scaled_dot_product_attention(query, key, value, scale=scale)
 
-# print(output)
+diff_ref = output_ref - output
+print(f"ref diff max: {diff_ref.max()}")
 
 for i in range(iter_num):
-    ipex_output = flash_attention.run(query, key, value, scale)
-# print(ipex_output)
+    ipex_output, debug_output = flash_attention.run(query, key, value, scale)
+
+print(f"scores diff max: {(scores_ref - debug_output).abs().max()}")
 
 query = query.to('cpu')
 key = key.to('cpu')
