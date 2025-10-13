@@ -408,7 +408,7 @@ class fmha_forward_t {
           args.L_ptr,
           {args.uF, args.uB * args.uN, args.uF},
           {start_x_ml, start_y_ml});
-      mem_desc_Qi_L.init(Qi_slm, {args.uH, kBr, args.uH}, {0, 0});
+      mem_desc_Qi_L.init(Qi_slm, {kHm, kBr, kHm}, {0, 0});
       mem_desc_Pij_L.init(Pij_slm, {kBc, kBr, kBc}, {0, 0});
     }
 
@@ -943,7 +943,6 @@ class fmha_forward_t {
   inline void preload_Qi([[maybe_unused]] arguments_t& args) {
     using matQi_tile_desc_t = typename gemm_Oi_t::matAcc_tile_desc_t;
     using matQi_t = subgroup::tile_t<scalar_t, matQi_tile_desc_t>;
-    using matQi_acct = subgroup::tile_t<accum_t, matQi_tile_desc_t>;
     using matQi_load_t = subgroup::mem_payload_t<
         mem_mask_desc_t<scalar_t, mem_desc_Qi_t::layout, mem_desc_Qi_t::space>,
         matQi_tile_desc_t,
@@ -978,10 +977,11 @@ class fmha_forward_t {
     mem_desc_Qi_store.update_coord(tile_offset_x, tile_offset_y);
 
     matQi_t matQi;
-    matQi_acct matQi_acc(0);
     matQi_load_t matQi_load(mem_desc_Qi_load);
     subgroup::tile_load(matQi, matQi_load);
 
+    /* using matQi_acct = subgroup::tile_t<accum_t, matQi_tile_desc_t>; */
+    /* matQi_acct matQi_acc(0); */
     /* subgroup::elemwise_cvt(matQi_acc, matQi); */
     /* accum_t scalar_value = matQi_acc.reg.xetla_select<1, 1>(0)[0]; */
     /* sycl::ext::oneapi::experimental::printf( */

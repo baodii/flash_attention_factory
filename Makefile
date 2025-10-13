@@ -26,7 +26,7 @@ TORCH_DIR 		 := $(shell python3 -c "import torch; import os; print(os.path.dirna
 LIB_DIR        := $(TORCH_DIR)/lib
 ESIMD_PATH     := $(CMPLR_ROOT)/include/sycl
 PYTHON_PATH    := $(shell python3 -c 'import sysconfig; print(sysconfig.get_paths()["include"])')
-IPEX_XETLA_DIR := /home/baodi/ipex/csrc/gpu/aten/operators/xetla/kernels
+IPEX_XETLA_DIR := /home/baodi/mount_space/origin_ipex/csrc/gpu/aten/operators/xetla/kernels
 
 # ------------------------------------------------------------
 # Includes and Libraries
