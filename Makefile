@@ -21,18 +21,19 @@ AOTFLAGS  := -Xsycl-target-backend=spir64_gen \
 # ------------------------------------------------------------
 # Paths
 # ------------------------------------------------------------
-# TORCH_DIR      := /home/baodi/workspace/pytorch/torch
-TORCH_DIR 		 := $(shell python3 -c "import torch; import os; print(os.path.dirname(torch.__file__))")
-LIB_DIR        := $(TORCH_DIR)/lib
-ESIMD_PATH     := $(CMPLR_ROOT)/include/sycl
-PYTHON_PATH    := $(shell python3 -c 'import sysconfig; print(sysconfig.get_paths()["include"])')
-IPEX_XETLA_DIR := /home/baodi/ipex/csrc/gpu/aten/operators/xetla/kernels
+TORCH_DIR       := $(shell python3 -c "import torch, os; print(os.path.dirname(torch.__file__))")
+LIB_DIR         := $(TORCH_DIR)/lib
+ESIMD_PATH      := $(CMPLR_ROOT)/include/sycl
+PYTHON_PATH     := $(shell python3 -c 'import sysconfig; print(sysconfig.get_paths()["include"])')
+IPEX_XETLA_DIR  := /home/baodi/mount_space/origin_ipex/csrc/gpu/aten/operators/xetla/kernels
+INCLUDE_DIR     := include
 
 # ------------------------------------------------------------
 # Includes and Libraries
 # ------------------------------------------------------------
-INCLUDES := -I. \
-            -I$(CXXOPTS_PATH)/include \
+INCLUDES := -I$(INCLUDE_DIR) \
+						-Ipaged_attention_reduce \
+            -Ipaged_attention_loop \
             -I$(TORCH_DIR)/include \
             -I$(TORCH_DIR)/include/torch/csrc/api/include \
             -I$(ESIMD_PATH) \
@@ -46,31 +47,36 @@ LIBS := -L$(LIB_DIR) \
         -Wl,-rpath,$(LIB_DIR)
 
 # ------------------------------------------------------------
-# Extension Definitions
+# Sources and Outputs
 # ------------------------------------------------------------
-EXTENSIONS := paged_attention_reduce paged_attention_loop
+REDUCE_SRC := paged_attention_reduce/paged_attention_reduce.cpp
+LOOP_SRC   := paged_attention_loop/paged_attention_loop.cpp
 
-# Auto-derive file names
-SRCS := $(addsuffix .cpp,$(EXTENSIONS))
-OUTS := $(addsuffix .so,$(EXTENSIONS))
+REDUCE_SO := paged_attention_reduce.so
+LOOP_SO   := paged_attention_loop.so
 
-# Auto-generate per-extension defines
-$(foreach ext,$(EXTENSIONS), \
-  $(eval $(ext)_DEFINES := -DTORCH_EXTENSION_NAME=$(ext)) \
-)
+# Per-extension defines
+REDUCE_DEFINES := -DTORCH_EXTENSION_NAME=paged_attention_reduce
+LOOP_DEFINES   := -DTORCH_EXTENSION_NAME=paged_attention_loop
 
 # ------------------------------------------------------------
-# Targets
+# Build Targets
 # ------------------------------------------------------------
 .PHONY: all clean
 
-all: $(OUTS)
+all: $(REDUCE_SO) $(LOOP_SO)
 
-%.so: %.cpp
-	$(CXX) $(CXXFLAGS) $(AOTFLAGS) $($(basename $@)_DEFINES) \
-	      $(INCLUDES) -shared $< -o $@ $(LIBS)
+$(REDUCE_SO): $(REDUCE_SRC)
+	@echo "Building $@ ..."
+	$(CXX) $(CXXFLAGS) $(AOTFLAGS) $(REDUCE_DEFINES) \
+	       $(INCLUDES) -shared $< -o $@ $(LIBS)
+
+$(LOOP_SO): $(LOOP_SRC)
+	@echo "Building $@ ..."
+	$(CXX) $(CXXFLAGS) $(AOTFLAGS) $(LOOP_DEFINES) \
+	       $(INCLUDES) -shared $< -o $@ $(LIBS)
 
 clean:
 	@echo "Cleaning build artifacts..."
-	@rm -f $(OUTS)
+	@rm -f $(REDUCE_SO) $(LOOP_SO)
 
