@@ -4,3 +4,5 @@ tags
 cscope
 *.so
 __pycache__
+lib
+build

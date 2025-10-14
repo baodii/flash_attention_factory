@@ -1,6 +1,6 @@
 import torch
-import paged_attention_loop
-import paged_attention_reduce
+from lib import paged_attention_loop
+from lib import paged_attention_reduce
 import pytest
 
 import math
