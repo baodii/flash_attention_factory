@@ -8,13 +8,11 @@ set(CMAKE_CXX_COMPILER icpx)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Release flags (default)
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2 -fPIC -fsycl -fsycl-targets=spir64_gen")
-
 # Debug build option
-option(DEBUG_BUILD "Enable debug build" OFF)
-if(DEBUG_BUILD)
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O0 -g -fPIC -fsycl -fsycl-targets=spir64_gen")
+else()
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2 -fPIC -fsycl -fsycl-targets=spir64_gen")
 endif()
 
 # Ahead-of-time (AOT) compilation flags
