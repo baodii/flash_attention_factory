@@ -1,6 +1,6 @@
-set(LIB_NAME paged_attention_loop)
+set(LIB_NAME paged_attention_fp8_loop)
 
-add_library(${LIB_NAME} SHARED paged_attention_loop.cpp)
+add_library(${LIB_NAME} SHARED paged_attention_fp8_loop.cpp)
 
 set_target_properties(${LIB_NAME} PROPERTIES PREFIX "")
 

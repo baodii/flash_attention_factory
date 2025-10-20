@@ -58,6 +58,7 @@ include_directories(
     ${PROJECT_SOURCE_DIR}/include
     ${PROJECT_SOURCE_DIR}/paged_attention_reduce
     ${PROJECT_SOURCE_DIR}/paged_attention_loop
+    ${PROJECT_SOURCE_DIR}/paged_attention_fp8_loop
     ${TORCH_DIR}/include
     ${TORCH_DIR}/include/torch/csrc/api/include
     ${ESIMD_PATH}
@@ -82,3 +83,4 @@ link_directories(${LIB_DIR})
 
 add_subdirectory(paged_attention_reduce)
 add_subdirectory(paged_attention_loop)
+add_subdirectory(paged_attention_fp8_loop)
