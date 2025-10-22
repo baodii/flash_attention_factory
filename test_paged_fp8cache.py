@@ -1,5 +1,6 @@
 import torch
 from lib import paged_attention_fp8_loop
+from lib import paged_attention_fp8_reduce
 import pytest
 
 import math
@@ -458,7 +459,8 @@ def test_flash_attn_kvcache(
     num_partitions = int((seqlen_k + partition_size - 1) / partition_size)
     max_logits = torch.empty((batch_size, nheads, num_partitions), dtype=torch.float32, device=device)
     exp_sums = torch.empty_like(max_logits)
-    out = torch.zeros((batch_size, nheads, d), dtype=dtype, device=device)
+    out_loop = torch.zeros((batch_size, nheads, d), dtype=dtype, device=device)
+    out_reduce = torch.zeros((batch_size, nheads, d), dtype=dtype, device=device)
     tem_output = torch.zeros((batch_size, nheads, num_partitions, d), dtype=dtype, device=device)
     debug_output = torch.zeros((batch_size, nheads, num_partitions * d), dtype=torch.float32, device=device)
     query = q.view(batch_size * seqlen_q, nheads, d).contiguous().to(device=device, dtype=dtype)
@@ -475,7 +477,28 @@ def test_flash_attn_kvcache(
         max_logits,
         exp_sums,
         tem_output,
-        out,
+        out_loop,
+        debug_output,
+        query,
+        k_cache_paged,
+        v_cache_paged,
+        block_table,
+        context_lens,
+        num_queries_per_token,
+        sm_scale,
+        1.0,
+        paged_kv_block_size,
+        seqlen_k,
+        alibi_slopes,
+        learnable_sinks,
+        softcat
+    )
+
+    eclips_times = paged_attention_fp8_reduce.run(
+        max_logits,
+        exp_sums,
+        tem_output,
+        out_reduce,
         debug_output,
         query,
         k_cache_paged,
@@ -508,7 +531,7 @@ def test_flash_attn_kvcache(
                 max_logits,
                 exp_sums,
                 tem_output,
-                out,
+                out_loop,
                 debug_output,
                 query,
                 k_caches[cur_idx],
@@ -542,16 +565,19 @@ def test_flash_attn_kvcache(
     out_attn_2 = out_attn_2.squeeze(2)
     out_partitions = out_partitions.squeeze(1)
     # print(f"out_ref: {out_ref[0, 0, :10]}")
-    # print(f"out: {out[0, 0, :10]}")
+    # print(f"out_loop: {out_loop[0, 0, :10]}")
     print(f"eclips times: {eclips_times}")
     # assert_close_verbose(out_attn_2, debug_output, rtol=1e-3, atol=1e-3)
-    # assert_close_verbose(out, out_ref, rtol=1e-3, atol=1e-3)
+    assert_close_verbose(out_loop, out_ref, rtol=1e-3, atol=1e-3)
+    assert_close_verbose(out_reduce, out_ref, rtol=1e-3, atol=1e-3)
     # print(f"debug_output: {debug_output[0, 0, :]}")
     # print(f"out_attn_2: {out_attn_2[0, 0, :]}")
     # print(f"scores max diff: {(out_attn_2 - debug_output[:, :, :seqlen_k]).abs().max().item()}")
     # exit(0)
-    print(f"Output max diff: {(out - out_ref).abs().max().item()}")
-    print(f"Output mean diff: {(out - out_ref).abs().mean().item()}")
+    print(f"Output max diff: {(out_loop - out_ref).abs().max().item()}")
+    print(f"Output mean diff: {(out_loop - out_ref).abs().mean().item()}")
+    print(f"Output max diff: {(out_reduce - out_ref).abs().max().item()}")
+    print(f"Output mean diff: {(out_reduce - out_ref).abs().mean().item()}")
     print(f"Pytorch max diff: {(out_pt - out_ref).abs().max().item()}")
     print(f"Pytorch mean diff: {(out_pt - out_ref).abs().mean().item()}")
 
@@ -579,13 +605,14 @@ def test_flash_attn_kvcache(
         assert torch.allclose(k_cache_select, k_cache_ref, rtol=1e-3, atol=1e-3)
         assert torch.equal(v_cache_select, v_cache_ref)
     mult = 3 if not alibi else 5
-    assert (out - out_ref).abs().max().item() <= mult * (out_pt - out_ref).abs().max().item() + 1e-5
+    assert (out_loop - out_ref).abs().max().item() <= mult * (out_pt - out_ref).abs().max().item() + 1e-5
+    assert (out_reduce - out_ref).abs().max().item() <= mult * (out_pt - out_ref).abs().max().item() + 1e-5
 
 
 if __name__ == "__main__":
     test_flash_attn_kvcache(
         batch_size = 64,
-        nheads = 64,
+        nheads = 40,
         nheads_k = 8,
         seqlen_q = 1,
         seqlen_k = 1500,
